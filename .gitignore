@@ -1,0 +1,48 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+# Conda: ignore in-tree envs, keep environment.yml tracked
+.conda/
+envs/
+
+# Data logger output (timestamped sessions + SQLite recordings)
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+images/
+record/
+recordings/
+data/
+
+# Local config / secrets (broker creds, per-host overrides).
+# The checked-in default config/bridge.yaml is tracked; local copies are not.
+*.local.yaml
+bridge.local.yaml
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
