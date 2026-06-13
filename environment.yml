@@ -1,0 +1,31 @@
+# Conda environment for rover_bridge — tested target is a Raspberry Pi 5
+# (linux-aarch64). All core deps are on conda-forge for ARM64; the camera SDKs
+# are NOT reliably packaged for conda on ARM, so install whichever one matches
+# your hardware via pip after the env is created (see README "Conda").
+#
+#   conda env create -f environment.yml
+#   conda activate rover_bridge
+#   pip install -e '.[oakd]'        # OR  pip install -e '.[realsense]'
+#
+# Update an existing env after changing this file:
+#   conda env update -f environment.yml --prune
+
+name: rover_bridge
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - numpy>=1.21
+  - pillow>=9.0
+  - pyyaml>=5.4
+  - pyserial>=3.5
+  # paho-mqtt is pinned <2 because the code uses the v1 callback API
+  # (on_connect(client, userdata, flags, rc)). Keep this in sync with pyproject.
+  - paho-mqtt>=1.6,<2.0
+  - pip
+  - pip:
+      # Editable install of this package. Core runtime deps above are already
+      # satisfied by conda, so pip just registers the package + entry point.
+      - -e .

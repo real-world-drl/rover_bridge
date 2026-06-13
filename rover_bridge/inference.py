@@ -1,0 +1,187 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Peter Bohm
+
+"""Inference-side MQTT client and action dispatch.
+
+This is the "always MQTT" half of the bridge, ported from ``ros_ws``'s
+``mqtt_client_manager.py``. It owns one MQTT client that:
+
+- publishes preprocessed camera frames to ``camera_topic`` (the model's input),
+- subscribes to ``action_topic`` (``omnivla/act``) for inference trajectories,
+- subscribes to ``ctrl_topic`` (``omnivla/ctrl``) for out-of-band stop/start.
+
+Action payloads are JSON, identical to the Spot setup since it's the same
+model: ``{"waypoints": [[x, y, sin, cos], ...]}`` (preferred) or a raw
+``{"linear": .., "angular": ..}`` fallback. The bridge converts those to
+cmd_vel via the waypoint follower / arc steering and the repeated publisher;
+the rover transport (UART or MQTT) is downstream of all of that.
+
+The stop/start halt state is sticky on purpose: after ``{"stop": true}`` the
+client drops every action message until ``{"start": true}`` arrives, so a
+still-streaming inference client can't leak motion back in after a manual stop.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from typing import Optional
+
+import paho.mqtt.client as mqtt
+
+from .control import CmdVel, RepeatedCmdVelPublisher, WaypointFollower
+from .logging_util import get_logger, log_throttle
+
+log = get_logger("inference")
+
+
+class InferenceClient:
+    def __init__(self, broker: str, port: int = 1883, keepalive: int = 60,
+                 action_topic: str = "omnivla/act", ctrl_topic: str = "omnivla/ctrl",
+                 camera_topic: Optional[str] = None,
+                 publisher: Optional[RepeatedCmdVelPublisher] = None,
+                 follower: Optional[WaypointFollower] = None,
+                 action_scale: float = 1.0):
+        """
+        Args:
+            broker/port/keepalive: MQTT connection to the inference broker.
+            action_topic: topic carrying inference trajectories.
+            ctrl_topic: topic carrying ``{"stop": true}`` / ``{"start": true}``.
+            camera_topic: topic this bridge publishes camera JPEGs to (the
+                model's input). The inference client must subscribe to the same.
+            publisher: RepeatedCmdVelPublisher for the raw-velocity fallback and
+                stop commands.
+            follower: WaypointFollower for waypoint trajectories (preferred).
+            action_scale: multiplier on raw linear/angular (fallback path only;
+                waypoint-derived velocities are scaled inside the follower).
+        """
+        self.broker = broker
+        self.port = port
+        self.keepalive = keepalive
+        self.action_topic = action_topic
+        self.ctrl_topic = ctrl_topic
+        self.camera_topic = camera_topic
+        self.publisher = publisher
+        self.follower = follower
+        self.action_scale = action_scale
+
+        self.client: Optional[mqtt.Client] = None
+        self.halted = False
+        self.halt_lock = threading.Lock()
+
+    # --- lifecycle ----------------------------------------------------------
+
+    def connect(self) -> mqtt.Client:
+        self.client = mqtt.Client()
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
+        log.info("connecting inference MQTT to %s:%d", self.broker, self.port)
+        self.client.connect(self.broker, self.port, self.keepalive)
+        self.client.loop_start()
+        return self.client
+
+    def disconnect(self) -> None:
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+            log.info("inference MQTT disconnected")
+
+    def publish_camera(self, jpeg: bytes) -> None:
+        """Publish a preprocessed camera frame. Wired to the camera backend."""
+        if self.client and self.camera_topic:
+            self.client.publish(self.camera_topic, jpeg, qos=0)
+
+    # --- MQTT callbacks -----------------------------------------------------
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            log.info("inference MQTT connected")
+            client.subscribe(self.action_topic)
+            log.info("subscribed to action topic: %s", self.action_topic)
+            if self.ctrl_topic:
+                client.subscribe(self.ctrl_topic)
+                log.info("subscribed to ctrl topic: %s", self.ctrl_topic)
+        else:
+            log.error("inference MQTT failed to connect (rc=%s)", rc)
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            log.warning("unexpected inference MQTT disconnect (rc=%s); reconnecting", rc)
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            if self.ctrl_topic and msg.topic == self.ctrl_topic:
+                self._handle_ctrl(msg)
+            else:
+                self._handle_action(msg)
+        except Exception as e:
+            log.error("error processing MQTT message on %s: %s", msg.topic, e)
+
+    # --- ctrl topic ---------------------------------------------------------
+
+    def _handle_ctrl(self, msg):
+        if not self.publisher:
+            log.warning("ctrl message received but no publisher configured")
+            return
+        try:
+            payload = json.loads(msg.payload)
+        except (json.JSONDecodeError, ValueError):
+            payload = msg.payload.decode("utf-8", errors="replace").strip()
+
+        if isinstance(payload, dict) and payload.get("stop") is True:
+            with self.halt_lock:
+                self.halted = True
+            log.info("STOP received on ctrl topic — halting; dropping actions until "
+                     '{"start": true}')
+            # Route through the follower (when present) so trajectory state is
+            # cleared too; otherwise publish a bare zero.
+            if self.follower:
+                self.follower.force_stop()
+            else:
+                self.publisher.publish(CmdVel())
+        elif isinstance(payload, dict) and payload.get("start") is True:
+            with self.halt_lock:
+                was_halted = self.halted
+                self.halted = False
+            if was_halted:
+                log.info("START received on ctrl topic — resuming on next action")
+            else:
+                log.info("START received on ctrl topic — already running (no-op)")
+        else:
+            log.warning("unrecognized ctrl payload (no action taken): %r", payload)
+
+    # --- action topic -------------------------------------------------------
+
+    def _handle_action(self, msg):
+        if not self.publisher:
+            log.warning("action message received but no publisher configured")
+            return
+
+        with self.halt_lock:
+            halted = self.halted
+        if halted:
+            log_throttle(log, logging.INFO, 2.0,
+                         'halted (waiting for {"start": true}) — ignoring action')
+            return
+
+        try:
+            payload = json.loads(msg.payload)
+        except json.JSONDecodeError as e:
+            log.error("failed to parse action message as JSON: %s", e)
+            return
+
+        # Preferred: waypoint trajectory through the follower (handles the
+        # initial command plus pose-driven advance + recompute).
+        if self.follower and "waypoints" in payload:
+            self.follower.on_new_action(payload["waypoints"])
+            return
+
+        # Fallback: raw linear/angular with action_scale.
+        cmd = CmdVel()
+        if "linear" in payload:
+            cmd.linear_x = payload["linear"] * self.action_scale
+        if "angular" in payload:
+            cmd.angular_z = payload["angular"] * self.action_scale
+        self.publisher.publish(cmd)

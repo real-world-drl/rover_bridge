@@ -1,0 +1,73 @@
+# Bridge configuration for rover_bridge.
+#
+# Usage:
+#   python -m rover_bridge                       # auto-loads this file
+#   python -m rover_bridge --config /path/to.yaml
+#   python -m rover_bridge --broker mqtt-h --transport mqtt   # CLI overrides
+#   python -m rover_bridge --config ''           # skip YAML, defaults + CLI only
+#
+# Precedence: CLI > YAML > built-in default.
+
+# --- Rover link (selectable) ----------------------------------------------
+# How cmd_vel reaches the rover and how telemetry comes back. The inference
+# side (camera out, omnivla/act + omnivla/ctrl in) is always MQTT regardless.
+transport: uart            # uart | mqtt
+
+# UART link (transport: uart). On a Pi 5, /dev/ttyAMA0 is shared with the BT
+# HCI by default — disable BT (use ttyAMA0) or enable a 2nd UART (use ttyAMA1).
+uart_port: /dev/ttyAMA0
+uart_baud: 921600
+
+# --- MQTT broker -----------------------------------------------------------
+# Used by the inference side always, and by the rover link when transport: mqtt.
+broker: localhost
+port: 1883
+# Robot id; substituted into ugv/<id>/v1/... topics. Only used when transport: mqtt.
+robot_id: ugv01
+
+# --- Inference topics (same model / topics as the Spot setup) --------------
+action_topic: omnivla/act     # inference trajectories in
+ctrl_topic: omnivla/ctrl      # {"stop": true} / {"start": true}
+camera_topic: rover/cam       # bridge publishes frames here; the model subscribes
+
+# --- Camera ----------------------------------------------------------------
+camera: oakd                  # oakd (default) | realsense
+no_camera: false              # set true to disable capture (e.g. when running the logger)
+rate_limit: 1.0               # camera publish cap (Hz); null = uncapped
+width: 1280                   # honored exactly by realsense; advisory for oakd
+height: 720
+fps: 15
+crop_mode: center            # center | top | stretch
+crop_top_fraction: 0.5       # only used when crop_mode == top
+
+# --- Action handling / arc steering ----------------------------------------
+action_scale: 1.0             # multiplier on raw linear/angular (fallback path only)
+use_waypoints: true           # arc-steer on waypoints instead of raw velocities
+waypoint_index: 2             # initial target waypoint (0-indexed)
+actuation_duration: 2.0       # seconds the arc is meant to be driven (velocity scale)
+max_linear_velocity: 0.5      # m/s  — rover-scale cap (firmware also clamps)
+max_angular_velocity: 2.0     # rad/s
+turn_in_place_threshold_deg: 45.0  # pivot in place above this bearing (diff-drive)
+min_angular_velocity: 0.0     # dead-band on |angular.z| (rad/s); 0 disables
+
+# --- cmd_vel publishing cadence (also the firmware heartbeat) --------------
+# Keep publish_rate well above 2 Hz or the rover stutter-stops on its 500 ms
+# heartbeat timeout. 20 ticks @ 10 Hz = 2 s buffer / 2 s explicit stop.
+publish_rate: 10.0
+max_publishes: 20
+max_zero_publishes: 20
+
+# --- Pose-driven waypoint advance (pose = host wheel odometry) -------------
+max_waypoint_advance: 3       # extra waypoints to advance to per trajectory; 0 = none
+waypoint_tolerance: 0.3       # metres within which a waypoint counts as reached
+recompute: true               # re-aim each buffer-phase command from latest pose
+max_action_age: null          # safety: stop if no fresh action within N s; null = off
+
+# --- Wheel odometry geometry (must match firmware Kconfig) -----------------
+wheel_diameter_mm: 80.0
+track_width_mm: 172.0
+encoder_ppr: 1650
+publish_display: false        # feed host odometry pose back to the rover's OLED
+
+# --- Misc ------------------------------------------------------------------
+log_level: INFO

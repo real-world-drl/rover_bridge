@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rover_bridge"
+version = "0.1.0"
+description = "OmniVLA inference bridge for the RoverLink differential rover (UART/MQTT)"
+authors = [{ name = "Peter Bohm" }]
+requires-python = ">=3.9"
+dependencies = [
+    "paho-mqtt>=1.6,<2.0",
+    "pyserial>=3.5",
+    "pillow>=9.0",
+    "numpy>=1.21",
+    "pyyaml>=5.4",
+]
+
+[project.optional-dependencies]
+# Camera backends are optional so the bridge installs on hosts without the
+# vendor SDKs. Install the one matching your hardware.
+oakd = ["depthai>=2.24"]
+realsense = ["pyrealsense2>=2.50"]
+
+[project.scripts]
+rover-bridge = "rover_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rover_bridge*"]
