@@ -115,9 +115,9 @@ stream — the model's input. The shared preprocessing (`crop_mode` ∈
 `center|top|stretch`, then resize to 224×224 JPEG) matches training-time
 preprocessing, so frames are interchangeable across backends.
 
-- **OAK-D Lite** runs 1080p ISP-scaled to 1280×720. `--width/--height` are
-  advisory for it (output is 224×224 regardless); the RealSense backend honors
-  them exactly.
+- **OAK-D Lite** captures via the DepthAI v3 API (`Camera.requestOutput`), which
+  ISP-scales to the exact `--width/--height`. The final inference frame is
+  224×224 either way.
 - Capture is rate-limited by `--rate-limit` (Hz), sized to your inference rate.
 
 ## Arc steering & differential drive

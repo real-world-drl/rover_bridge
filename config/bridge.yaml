@@ -15,12 +15,12 @@ transport: uart            # uart | mqtt
 
 # UART link (transport: uart). On a Pi 5, /dev/ttyAMA0 is shared with the BT
 # HCI by default — disable BT (use ttyAMA0) or enable a 2nd UART (use ttyAMA1).
-uart_port: /dev/ttyAMA0
+uart_port: /dev/ttyAMA10
 uart_baud: 921600
 
 # --- MQTT broker -----------------------------------------------------------
 # Used by the inference side always, and by the rover link when transport: mqtt.
-broker: localhost
+broker: darkhorse
 port: 1883
 # Robot id; substituted into ugv/<id>/v1/... topics. Only used when transport: mqtt.
 robot_id: ugv01
@@ -28,7 +28,7 @@ robot_id: ugv01
 # --- Inference topics (same model / topics as the Spot setup) --------------
 action_topic: omnivla/act     # inference trajectories in
 ctrl_topic: omnivla/ctrl      # {"stop": true} / {"start": true}
-camera_topic: rover/cam       # bridge publishes frames here; the model subscribes
+camera_topic: r2/realsense       # bridge publishes frames here; the model subscribes
 
 # --- Camera ----------------------------------------------------------------
 camera: oakd                  # oakd (default) | realsense
@@ -37,7 +37,7 @@ rate_limit: 1.0               # camera publish cap (Hz); null = uncapped
 width: 1280                   # honored exactly by realsense; advisory for oakd
 height: 720
 fps: 15
-crop_mode: center            # center | top | stretch
+crop_mode: stretch            # center | top | stretch
 crop_top_fraction: 0.5       # only used when crop_mode == top
 
 # --- Action handling / arc steering ----------------------------------------
@@ -66,7 +66,7 @@ max_action_age: null          # safety: stop if no fresh action within N s; null
 # --- Wheel odometry geometry (must match firmware Kconfig) -----------------
 wheel_diameter_mm: 80.0
 track_width_mm: 172.0
-encoder_ppr: 1650
+encoder_ppr: 1050
 publish_display: false        # feed host odometry pose back to the rover's OLED
 
 # --- Misc ------------------------------------------------------------------

@@ -4,14 +4,12 @@
 """DepthAI OAK-D Lite color camera backend (the default).
 
 Only the RGB color stream is used — the same input the OmniVLA model trains
-on. Depth is available on this device but unused here; add a depth XLinkOut if
-a future model wants it.
+on. Depth is available on this device but unused here.
 
-Capture note: the OAK-D Lite color sensor's native presets are 1080p/4K/12MP.
-We run 1080p and ISP-downscale 2:3 to 1280×720, then the shared preprocess
-crops/resizes to the model's square input. ``--width/--height`` are therefore
-advisory for this backend (final frames are 224×224 regardless); the RealSense
-backend honors them exactly.
+Targets the DepthAI v3 API (``Camera.build`` + ``requestOutput`` +
+``createOutputQueue``). v3 removed the legacy ``ColorCamera`` + ``XLinkOut``
+pipeline; ``requestOutput((w, h), ...)`` ISP-scales to the exact requested
+size, so ``--width/--height`` are honored.
 """
 
 from __future__ import annotations
@@ -31,29 +29,23 @@ class OakDCamera(CameraSource):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._device = None
+        self._pipeline = None
         self._queue = None
 
     def open_device(self) -> None:
         import depthai as dai  # imported lazily so the dep is optional
 
-        pipeline = dai.Pipeline()
-        cam = pipeline.create(dai.node.ColorCamera)
-        cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-        cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        cam.setIspScale(2, 3)  # 1920x1080 -> 1280x720
-        cam.setInterleaved(False)
-        cam.setFps(float(self.fps))
-
-        xout = pipeline.create(dai.node.XLinkOut)
-        xout.setStreamName("rgb")
-        cam.video.link(xout.input)
-
-        self._device = dai.Device(pipeline)
-        # maxSize=1 + non-blocking keeps us on the freshest frame; stale frames
-        # are dropped rather than queued into seconds of lag.
-        self._queue = self._device.getOutputQueue("rgb", maxSize=1, blocking=False)
-        log.info("OAK-D color stream up (1080p ISP-scaled to 1280x720 @ %d FPS)", self.fps)
+        self._pipeline = dai.Pipeline()
+        cam = self._pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+        # requestOutput((w, h), ...) ISP-scales to the exact requested size.
+        # BGR888i comes out in OpenCV channel order; we flip to RGB for PIL in
+        # read_rgb().
+        output = cam.requestOutput((self.width, self.height),
+                                   dai.ImgFrame.Type.BGR888i, fps=float(self.fps))
+        self._queue = output.createOutputQueue(maxSize=1, blocking=False)
+        self._pipeline.start()
+        log.info("OAK-D color stream up (%dx%d @ %d FPS, depthai %s)",
+                 self.width, self.height, self.fps, dai.__version__)
 
     def read_rgb(self) -> Optional[np.ndarray]:
         # Block until a frame is available so the loop doesn't busy-spin.
@@ -65,7 +57,7 @@ class OakDCamera(CameraSource):
         return np.ascontiguousarray(bgr[:, :, ::-1])
 
     def close_device(self) -> None:
-        if self._device is not None:
-            self._device.close()
-            self._device = None
-            self._queue = None
+        if self._pipeline is not None:
+            self._pipeline.stop()
+            self._pipeline = None
+        self._queue = None
