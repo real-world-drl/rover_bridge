@@ -24,12 +24,41 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import Callable, Optional
 
 from . import wire
 from .logging_util import get_logger
 
 log = get_logger("odometry")
+
+
+def pose_stamped_dict(x: float, y: float, yaw: float, frame_id: str = "odom",
+                      seq: int = 0) -> dict:
+    """Build a ``geometry_msgs/PoseStamped``-shaped dict from a planar pose.
+
+    Matches the JSON ros_ws publishes when it forwards a PoseStamped pose topic
+    to MQTT (``ros_msg_to_dict``): ``{header, pose:{position, orientation}}``,
+    z = 0 and a yaw-only quaternion (roll = pitch = 0). Consumers walk
+    ``["pose"]["position"]`` / ``["pose"]["orientation"]`` exactly as they would
+    for the Spot feed. Yaw is the standard CCW math convention; consumers apply
+    their own heading convention (as the data logger's ``quat_to_rpy`` does).
+    """
+    ns = time.time_ns()
+    return {
+        "header": {
+            "seq": seq,
+            "stamp": {"secs": ns // 1_000_000_000, "nsecs": ns % 1_000_000_000},
+            "frame_id": frame_id,
+        },
+        "pose": {
+            "position": {"x": x, "y": y, "z": 0.0},
+            "orientation": {
+                "x": 0.0, "y": 0.0,
+                "z": math.sin(yaw / 2.0), "w": math.cos(yaw / 2.0),
+            },
+        },
+    }
 
 
 class WheelOdometry:

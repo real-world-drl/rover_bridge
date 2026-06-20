@@ -16,15 +16,18 @@ on the inference side is MQTT regardless.
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from types import SimpleNamespace
 
 from . import wire
+from .battery import percent_from_voltage
 from .cameras import make_camera
 from .control import ArcSteering, RepeatedCmdVelPublisher, WaypointFollower
 from .inference import InferenceClient
 from .logging_util import get_logger, log_throttle
-from .odometry import WheelOdometry
+from .odometry import WheelOdometry, pose_stamped_dict
 from .transports import TelemetryCallbacks, make_transport
 
 log = get_logger("bridge")
@@ -79,7 +82,8 @@ class RoverBridge:
             encoder_ppr=cfg.encoder_ppr,
             on_pose=self._on_pose,
         )
-        self.callbacks.on_wheel = self.odometry.update
+        self._wheel_seen = False
+        self.callbacks.on_wheel = self._on_wheel
         self.callbacks.on_battery = self._on_battery
         self.callbacks.on_status = self._on_status
         # IMU is high-rate and unused by the control loop; ignore by default.
@@ -89,9 +93,15 @@ class RoverBridge:
             broker=cfg.broker, port=cfg.port,
             action_topic=cfg.action_topic, ctrl_topic=cfg.ctrl_topic,
             camera_topic=cfg.camera_topic,
+            pose_topic=cfg.pose_topic if cfg.publish_pose else None,
+            battery_topic=cfg.battery_topic if cfg.publish_battery else None,
             publisher=self.publisher, follower=self.follower,
             action_scale=cfg.action_scale,
         )
+
+        # Pose streaming bookkeeping (rate-limited in _on_pose).
+        self._pose_seq = 0
+        self._last_pose_pub = None
 
         # --- camera ---------------------------------------------------------
         self.camera = None
@@ -105,16 +115,56 @@ class RoverBridge:
 
     # --- pose / telemetry handlers -----------------------------------------
 
+    def _on_wheel(self, telem: wire.WheelTelem) -> None:
+        if not self._wheel_seen:
+            self._wheel_seen = True
+            log.info("first wheel telemetry received (seq=%d, ticks L=%d R=%d) — "
+                     "odometry + pose streaming active",
+                     telem.seq, telem.left_ticks, telem.right_ticks)
+        self.odometry.update(telem)
+
     def _on_pose(self, x: float, y: float, yaw: float) -> None:
         if self.follower:
             self.follower.update_pose(x, y, yaw)
         if self.cfg.publish_display:
             # Feed the rover's OLED its host-authoritative pose.
             self.transport.send_cmd_display(x, y, yaw, 0.0, 0.0)
+        if self.cfg.publish_pose:
+            self._publish_pose(x, y, yaw)
+
+    def _publish_pose(self, x: float, y: float, yaw: float) -> None:
+        """Stream odometry pose to MQTT (PoseStamped JSON), rate-limited.
+
+        Wheel telemetry arrives at ~50 Hz; pose_rate_limit caps how often we
+        forward it (null = every sample), mirroring ros_ws's per-topic cap.
+        """
+        limit = self.cfg.pose_rate_limit
+        if limit is not None:
+            now = time.monotonic()
+            if self._last_pose_pub is not None and (now - self._last_pose_pub) < 1.0 / limit:
+                return
+            self._last_pose_pub = now
+        msg = pose_stamped_dict(x, y, yaw, frame_id=self.cfg.pose_frame_id,
+                                seq=self._pose_seq)
+        self._pose_seq += 1
+        self.inference.publish_pose(json.dumps(msg))
+        log_throttle(log, logging.INFO, 5.0,
+                     f"streaming pose -> {self.cfg.pose_topic}: "
+                     f"x={x:.2f} y={y:.2f} yaw={yaw:.2f}")
 
     def _on_battery(self, telem: wire.BatteryTelem) -> None:
+        pct = percent_from_voltage(telem.voltage_v, cells=self.cfg.battery_cells)
+        if self.cfg.publish_battery:
+            msg = {
+                "data": round(pct, 1),          # charge % (matches ros_ws Float32 shape)
+                "voltage_v": round(telem.voltage_v, 3),
+                "current_a": round(telem.current_a, 3),
+                "cells": self.cfg.battery_cells,
+            }
+            self.inference.publish_battery(json.dumps(msg))
         log_throttle(log, logging.INFO, 10.0,
-                     f"battery {telem.voltage_v:.2f} V {telem.current_a:+.2f} A")
+                     f"battery {telem.voltage_v:.2f} V {telem.current_a:+.2f} A "
+                     f"(~{pct:.0f}%, {self.cfg.battery_cells}S)")
 
     def _on_status(self, status: str) -> None:
         log.info("rover status: %s", status)

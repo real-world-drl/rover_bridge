@@ -46,3 +46,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Caches (e.g. DepthAI bootloader/blob cache)
+.cache/

@@ -102,14 +102,27 @@ class UartTransport(RoverTransport):
 
     def _rx_loop(self) -> None:
         last_stats = time.monotonic()
+        bytes_rx = 0
         while self._running:
             try:
                 data = self._ser.read(256)
                 if data:
+                    bytes_rx += len(data)
                     self._decoder.feed(data)
                 now = time.monotonic()
                 if now - last_stats > self._stats_period:
-                    log.debug("rx stats: %s", self._decoder.stats)
+                    s = self._decoder.stats
+                    if bytes_rx == 0:
+                        log.warning("UART RX: no bytes in %.0fs on %s — check wiring "
+                                    "(TX/RX), baud (%d), and that the rover is sending "
+                                    "telemetry", self._stats_period, self._port, self._baud)
+                    elif s["ok"] == 0:
+                        log.warning("UART RX: %d bytes but 0 valid frames (%s) — likely "
+                                    "a baud mismatch or non-UGV data on the line",
+                                    bytes_rx, s)
+                    else:
+                        log.info("UART RX: %d bytes, frames %s", bytes_rx, s)
+                    bytes_rx = 0
                     last_stats = now
             except self._serial.SerialException as e:
                 log.error("serial read error: %s", e)

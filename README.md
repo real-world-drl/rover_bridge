@@ -16,6 +16,7 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
    model ─MQTT(omnivla/act)─▶ bridge ─arc steering─▶ repeated cmd_vel
         ─UART/MQTT─▶ rover         (also the firmware heartbeat)
    rover ─tel/wheel─▶ bridge ─wheel odometry─▶ pose ─▶ waypoint advance
+                                                    └─MQTT(pose_topic)▶ consumers
 ```
 
 1. **Camera → model.** Captures from an OAK-D Lite (default) or RealSense
@@ -160,6 +161,47 @@ feeding the waypoint follower. The geometry **must match the firmware Kconfig**:
 
 Set `publish_display: true` to feed this host pose back to the rover's OLED
 (`cmd/display`).
+
+### Pose streaming
+
+The odometry pose is also streamed to MQTT for the inference side / external
+consumers, in the **same format ros_ws used** — a `geometry_msgs/PoseStamped`
+serialized to JSON:
+
+```json
+{"header": {"seq": 0, "stamp": {"secs": 0, "nsecs": 0}, "frame_id": "odom"},
+ "pose": {"position": {"x": 0.0, "y": 0.0, "z": 0.0},
+          "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}}}
+```
+
+`z` is always 0 and the quaternion is yaw-only (the rover is planar). Yaw is
+the standard CCW math convention; consumers apply their own heading convention,
+exactly as the data logger's `quat_to_rpy` does. Configure with:
+
+- `publish_pose` (default `true`) — enable/disable.
+- `pose_topic` (default `rover/pose`) — must match what the consumer subscribes to.
+- `pose_rate_limit` (default `10.0` Hz; `null` = every ~50 Hz odometry sample).
+- `pose_frame_id` (default `odom`).
+
+### Battery
+
+The rover reports raw pack voltage + current (`tel/battery`); the bridge
+converts pack voltage to a charge percentage for the 3S Li-ion pack and streams
+it, with `data` matching ros_ws's `Float32` `charge_percentage` shape:
+
+```json
+{"data": 78.0, "voltage_v": 12.05, "current_a": 1.2, "cells": 3}
+```
+
+- `publish_battery` (default `true`), `battery_topic` (default `rover/battery`).
+- `battery_cells` (default `3`) — series Li-ion cells.
+
+The percentage comes from a per-cell **open-circuit-voltage** lookup
+([`battery.py`](rover_bridge/battery.py)), so it's a rough gauge, not a fuel
+gauge: Li-ion OCV is flat through the mid-range, and under motor load the pack
+voltage sags, so the estimate reads low while driving. Published at the
+firmware's battery telemetry rate (~1 Hz). Retune the OCV table in `battery.py`
+if your cells differ.
 
 ## Data logger
 

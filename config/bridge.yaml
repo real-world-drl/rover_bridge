@@ -30,6 +30,22 @@ action_topic: omnivla/act     # inference trajectories in
 ctrl_topic: omnivla/ctrl      # {"stop": true} / {"start": true}
 camera_topic: r2/realsense       # bridge publishes frames here; the model subscribes
 
+# --- Pose streaming --------------------------------------------------------
+# Wheel-odometry pose, published to MQTT as PoseStamped-shaped JSON (same
+# format ros_ws forwards its SLAM pose in): {header, pose:{position, orientation}}.
+publish_pose: true
+pose_topic: r2/slam/odom/tip/pose        # MQTT topic the pose is published on
+pose_rate_limit: 10.0         # publish cap (Hz); null = every odometry sample (~50 Hz)
+pose_frame_id: odom           # header.frame_id in the published message
+
+# --- Battery ---------------------------------------------------------------
+# Charge percentage derived from pack voltage (tel/battery) via a Li-ion OCV
+# curve. Published as {"data": pct, "voltage_v":.., "current_a":.., "cells":..}
+# — the "data" field matches ros_ws's Float32 charge_percentage shape.
+publish_battery: true
+battery_topic: rover/battery  # MQTT topic the charge percentage is published on
+battery_cells: 3              # series Li-ion cells (3S pack)
+
 # --- Camera ----------------------------------------------------------------
 camera: oakd                  # oakd (default) | realsense
 no_camera: false              # set true to disable capture (e.g. when running the logger)
@@ -66,7 +82,7 @@ max_action_age: null          # safety: stop if no fresh action within N s; null
 # --- Wheel odometry geometry (must match firmware Kconfig) -----------------
 wheel_diameter_mm: 80.0
 track_width_mm: 172.0
-encoder_ppr: 1050
+encoder_ppr: 2100
 publish_display: false        # feed host odometry pose back to the rover's OLED
 
 # --- Misc ------------------------------------------------------------------

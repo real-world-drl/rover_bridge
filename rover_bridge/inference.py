@@ -39,7 +39,8 @@ log = get_logger("inference")
 class InferenceClient:
     def __init__(self, broker: str, port: int = 1883, keepalive: int = 60,
                  action_topic: str = "omnivla/act", ctrl_topic: str = "omnivla/ctrl",
-                 camera_topic: Optional[str] = None,
+                 camera_topic: Optional[str] = None, pose_topic: Optional[str] = None,
+                 battery_topic: Optional[str] = None,
                  publisher: Optional[RepeatedCmdVelPublisher] = None,
                  follower: Optional[WaypointFollower] = None,
                  action_scale: float = 1.0):
@@ -50,6 +51,11 @@ class InferenceClient:
             ctrl_topic: topic carrying ``{"stop": true}`` / ``{"start": true}``.
             camera_topic: topic this bridge publishes camera JPEGs to (the
                 model's input). The inference client must subscribe to the same.
+            pose_topic: topic this bridge publishes the rover's odometry pose to
+                (PoseStamped-shaped JSON, matching ros_ws). None disables it.
+            battery_topic: topic this bridge publishes battery charge percentage
+                to (``{"data": pct, ...}`` JSON, matching ros_ws's Float32
+                charge_percentage). None disables it.
             publisher: RepeatedCmdVelPublisher for the raw-velocity fallback and
                 stop commands.
             follower: WaypointFollower for waypoint trajectories (preferred).
@@ -62,6 +68,8 @@ class InferenceClient:
         self.action_topic = action_topic
         self.ctrl_topic = ctrl_topic
         self.camera_topic = camera_topic
+        self.pose_topic = pose_topic
+        self.battery_topic = battery_topic
         self.publisher = publisher
         self.follower = follower
         self.action_scale = action_scale
@@ -92,6 +100,16 @@ class InferenceClient:
         """Publish a preprocessed camera frame. Wired to the camera backend."""
         if self.client and self.camera_topic:
             self.client.publish(self.camera_topic, jpeg, qos=0)
+
+    def publish_pose(self, pose_json: str) -> None:
+        """Publish a pose message (JSON string). Wired to wheel odometry."""
+        if self.client and self.pose_topic:
+            self.client.publish(self.pose_topic, pose_json, qos=0)
+
+    def publish_battery(self, battery_json: str) -> None:
+        """Publish a battery message (JSON string). Wired to battery telemetry."""
+        if self.client and self.battery_topic:
+            self.client.publish(self.battery_topic, battery_json, qos=0)
 
     # --- MQTT callbacks -----------------------------------------------------
 

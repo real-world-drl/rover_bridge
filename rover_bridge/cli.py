@@ -39,6 +39,13 @@ DEFAULTS = {
     "action_topic": "omnivla/act",
     "ctrl_topic": "omnivla/ctrl",
     "camera_topic": "rover/cam",    # bridge publishes frames here; model subscribes
+    "pose_topic": "rover/pose",     # bridge publishes odometry pose here (PoseStamped JSON)
+    "publish_pose": True,           # stream wheel-odometry pose to pose_topic
+    "pose_rate_limit": 10.0,        # pose publish cap (Hz); null = every odom sample
+    "pose_frame_id": "odom",        # header.frame_id in the published pose
+    "battery_topic": "rover/battery",  # bridge publishes battery charge % here ({"data": pct})
+    "publish_battery": True,        # stream battery charge percentage to battery_topic
+    "battery_cells": 3,             # series Li-ion cells (3S pack) for the SoC estimate
 
     # camera
     "camera": "oakd",               # oakd | realsense
@@ -82,15 +89,16 @@ DEFAULTS = {
 }
 
 # (flag_dest, type, help) for keys whose CLI type isn't a plain str/auto.
-_BOOL_KEYS = {"no_camera", "use_waypoints", "recompute", "publish_display"}
+_BOOL_KEYS = {"no_camera", "use_waypoints", "recompute", "publish_display",
+              "publish_pose", "publish_battery"}
 _FLOAT_KEYS = {"rate_limit", "crop_top_fraction", "action_scale", "actuation_duration",
                "max_linear_velocity", "max_angular_velocity",
                "turn_in_place_threshold_deg", "min_angular_velocity",
                "publish_rate", "waypoint_tolerance", "max_action_age",
-               "wheel_diameter_mm", "track_width_mm"}
+               "wheel_diameter_mm", "track_width_mm", "pose_rate_limit"}
 _INT_KEYS = {"port", "uart_baud", "width", "height", "fps", "waypoint_index",
              "max_publishes", "max_zero_publishes", "max_waypoint_advance",
-             "encoder_ppr"}
+             "encoder_ppr", "battery_cells"}
 
 
 def _default_config_path():
