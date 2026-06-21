@@ -38,6 +38,7 @@ DEFAULTS = {
     # inference topics
     "action_topic": "omnivla/act",
     "ctrl_topic": "omnivla/ctrl",
+    "remote_topic": "omnivla/remote",  # manual teleop {"linear":..,"angular":..}; moves even while halted
     "camera_topic": "rover/cam",    # bridge publishes frames here; model subscribes
     "pose_topic": "rover/pose",     # bridge publishes odometry pose here (PoseStamped JSON)
     "publish_pose": True,           # stream wheel-odometry pose to pose_topic
@@ -205,8 +206,8 @@ def main(argv=None) -> int:
              cfg.transport, cfg.camera, cfg.broker, cfg.port, cfg.robot_id)
     if cfg.transport == "uart":
         log.info("rover link: UART %s @ %d", cfg.uart_port, cfg.uart_baud)
-    log.info("inference: action=%s ctrl=%s camera_topic=%s",
-             cfg.action_topic, cfg.ctrl_topic, cfg.camera_topic)
+    log.info("inference: action=%s ctrl=%s remote=%s camera_topic=%s",
+             cfg.action_topic, cfg.ctrl_topic, cfg.remote_topic, cfg.camera_topic)
     if cfg.use_waypoints:
         log.info("arc steering: waypoint_index=%d advance=%d tolerance=%.2f m recompute=%s",
                  cfg.waypoint_index, cfg.max_waypoint_advance, cfg.waypoint_tolerance,

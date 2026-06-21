@@ -8,7 +8,8 @@ This is the "always MQTT" half of the bridge, ported from ``ros_ws``'s
 
 - publishes preprocessed camera frames to ``camera_topic`` (the model's input),
 - subscribes to ``action_topic`` (``omnivla/act``) for inference trajectories,
-- subscribes to ``ctrl_topic`` (``omnivla/ctrl``) for out-of-band stop/start.
+- subscribes to ``ctrl_topic`` (``omnivla/ctrl``) for out-of-band stop/start,
+- subscribes to ``remote_topic`` (``omnivla/remote``) for manual teleop.
 
 Action payloads are JSON, identical to the Spot setup since it's the same
 model: ``{"waypoints": [[x, y, sin, cos], ...]}`` (preferred) or a raw
@@ -19,6 +20,11 @@ the rover transport (UART or MQTT) is downstream of all of that.
 The stop/start halt state is sticky on purpose: after ``{"stop": true}`` the
 client drops every action message until ``{"start": true}`` arrives, so a
 still-streaming inference client can't leak motion back in after a manual stop.
+
+Remote teleop is the deliberate exception: ``remote_topic`` accepts
+``{"linear": .., "angular": ..}`` and moves the rover *even while halted* — it
+bypasses the halt state without changing it, so an operator can drive manually
+while inference actuation stays stopped.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ log = get_logger("inference")
 class InferenceClient:
     def __init__(self, broker: str, port: int = 1883, keepalive: int = 60,
                  action_topic: str = "omnivla/act", ctrl_topic: str = "omnivla/ctrl",
+                 remote_topic: Optional[str] = "omnivla/remote",
                  camera_topic: Optional[str] = None, pose_topic: Optional[str] = None,
                  battery_topic: Optional[str] = None,
                  publisher: Optional[RepeatedCmdVelPublisher] = None,
@@ -49,6 +56,10 @@ class InferenceClient:
             broker/port/keepalive: MQTT connection to the inference broker.
             action_topic: topic carrying inference trajectories.
             ctrl_topic: topic carrying ``{"stop": true}`` / ``{"start": true}``.
+            remote_topic: topic carrying manual teleop ``{"linear": ..,
+                "angular": ..}``. These move the rover even while halted (waiting
+                for a ``{"start": true}``) — they bypass the inference halt state
+                without changing it. None disables it.
             camera_topic: topic this bridge publishes camera JPEGs to (the
                 model's input). The inference client must subscribe to the same.
             pose_topic: topic this bridge publishes the rover's odometry pose to
@@ -67,6 +78,7 @@ class InferenceClient:
         self.keepalive = keepalive
         self.action_topic = action_topic
         self.ctrl_topic = ctrl_topic
+        self.remote_topic = remote_topic
         self.camera_topic = camera_topic
         self.pose_topic = pose_topic
         self.battery_topic = battery_topic
@@ -121,6 +133,10 @@ class InferenceClient:
             if self.ctrl_topic:
                 client.subscribe(self.ctrl_topic)
                 log.info("subscribed to ctrl topic: %s", self.ctrl_topic)
+            if self.remote_topic:
+                client.subscribe(self.remote_topic)
+                log.info("subscribed to remote topic: %s (moves even while halted)",
+                         self.remote_topic)
         else:
             log.error("inference MQTT failed to connect (rc=%s)", rc)
 
@@ -132,6 +148,8 @@ class InferenceClient:
         try:
             if self.ctrl_topic and msg.topic == self.ctrl_topic:
                 self._handle_ctrl(msg)
+            elif self.remote_topic and msg.topic == self.remote_topic:
+                self._handle_remote(msg)
             else:
                 self._handle_action(msg)
         except Exception as e:
@@ -202,4 +220,41 @@ class InferenceClient:
             cmd.linear_x = payload["linear"] * self.action_scale
         if "angular" in payload:
             cmd.angular_z = payload["angular"] * self.action_scale
+        self.publisher.publish(cmd)
+
+    # --- remote topic -------------------------------------------------------
+
+    def _handle_remote(self, msg):
+        """Handle a manual teleop message: ``{"linear": .., "angular": ..}`` -> cmd_vel.
+
+        Unlike action messages, remote commands ignore the halt state so an
+        operator can drive the rover while inference actuation is stopped
+        (waiting for a ``{"start": true}``). They do NOT change the halt state —
+        once the remote command's publisher buffer expires the rover stops and
+        inference stays halted. Send a steady stream to keep driving.
+        """
+        if not self.publisher:
+            log.warning("remote message received but no publisher configured")
+            return
+
+        try:
+            payload = json.loads(msg.payload)
+        except json.JSONDecodeError as e:
+            log.error("failed to parse remote message as JSON: %s", e)
+            return
+
+        if not isinstance(payload, dict):
+            log.warning("unrecognized remote payload (expected JSON object): %r", payload)
+            return
+
+        cmd = CmdVel(
+            linear_x=float(payload.get("linear", 0.0)) * self.action_scale,
+            angular_z=float(payload.get("angular", 0.0)) * self.action_scale,
+        )
+
+        # Clear any in-flight waypoint trajectory so a pose update can't override
+        # the remote command via WaypointFollower._maybe_advance. force_stop
+        # pushes a zero cmd_vel, but the publish below immediately supersedes it.
+        if self.follower:
+            self.follower.force_stop()
         self.publisher.publish(cmd)

@@ -92,6 +92,7 @@ class RoverBridge:
         self.inference = InferenceClient(
             broker=cfg.broker, port=cfg.port,
             action_topic=cfg.action_topic, ctrl_topic=cfg.ctrl_topic,
+            remote_topic=cfg.remote_topic,
             camera_topic=cfg.camera_topic,
             pose_topic=cfg.pose_topic if cfg.publish_pose else None,
             battery_topic=cfg.battery_topic if cfg.publish_battery else None,

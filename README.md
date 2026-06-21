@@ -28,7 +28,9 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
    RoverLink's heartbeat (no `cmd_vel` within ~500 ms → the rover stops).
 3. **Stop/start.** `omnivla/ctrl` accepts `{"stop": true}` (immediate, sticky
    halt) and `{"start": true}` (resume).
-4. **Pose-driven advance.** The rover's encoders feed `tel/wheel`; the bridge
+4. **Remote teleop.** `omnivla/remote` accepts `{"linear": .., "angular": ..}`
+   and drives the rover manually — *even while halted* (see below).
+5. **Pose-driven advance.** The rover's encoders feed `tel/wheel`; the bridge
    integrates the cumulative ticks into `(x, y, yaw)` and advances through the
    trajectory's waypoints as the rover reaches each one — smoothing over
    inference latency.
@@ -146,6 +148,26 @@ command the publisher runs two phases:
 
 A new action cancels both and restarts. `{"stop": true}` on the ctrl topic
 halts immediately and stays halted until `{"start": true}`.
+
+## Remote teleop
+
+`remote_topic` (default `omnivla/remote`) lets an operator drive the rover
+manually, independent of inference. It accepts `{"linear": 0.3, "angular":
+0.14}` — linear (m/s) and angular (rad/s) velocities, converted to `cmd_vel`
+and pushed through the same repeated publisher (so the heartbeat and buffer/zero
+phases still apply). Missing `linear`/`angular` default to 0.
+
+Remote velocities are multiplied by `action_scale` (default `1.0`, i.e. 1:1).
+`action_scale` is **shared** with inference actions on `omnivla/act`; there is
+no separate remote-only scale.
+
+Unlike actions on `omnivla/act`, remote commands **move the rover even while the
+bridge is halted** (i.e. after `{"stop": true}`, waiting for `{"start": true}`).
+They bypass the halt state but do **not** change it: once the command's
+republish buffer expires (see above) the rover stops and inference stays halted.
+Each remote command also clears any in-flight waypoint trajectory so pose-driven
+advance can't override it. Send a steady stream of remote messages to keep
+driving.
 
 ## Wheel odometry
 
