@@ -61,6 +61,23 @@ def pose_stamped_dict(x: float, y: float, yaw: float, frame_id: str = "odom",
     }
 
 
+def pose_from_stamped_dict(d: dict) -> tuple:
+    """Inverse of ``pose_stamped_dict``: extract ``(x, y, yaw)`` from a
+    PoseStamped-shaped dict.
+
+    Reads ``pose.position.x/y`` and the ZYX yaw of ``pose.orientation``. The
+    orientation may be a full 3D quaternion (rover_vio's VIO pose) rather than
+    the yaw-only one this module emits; on a ground rover roll/pitch are ~0, so
+    the extracted yaw is the heading. Used by the bridge when ``pose_source:
+    vio`` to consume rover_vio's pose in place of wheel odometry.
+    """
+    p = d["pose"]["position"]
+    o = d["pose"]["orientation"]
+    qx, qy, qz, qw = float(o["x"]), float(o["y"]), float(o["z"]), float(o["w"])
+    yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    return float(p["x"]), float(p["y"]), yaw
+
+
 class WheelOdometry:
     def __init__(self, wheel_diameter_m: float = 0.080,
                  track_width_m: float = 0.172,

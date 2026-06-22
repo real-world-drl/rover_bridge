@@ -40,8 +40,10 @@ DEFAULTS = {
     "ctrl_topic": "omnivla/ctrl",
     "remote_topic": "omnivla/remote",  # manual teleop {"linear":..,"angular":..}; moves even while halted
     "camera_topic": "rover/cam",    # bridge publishes frames here; model subscribes
+    "pose_source": "wheel",         # wheel | vio  — what feeds the waypoint follower
     "pose_topic": "rover/pose",     # bridge publishes odometry pose here (PoseStamped JSON)
-    "publish_pose": True,           # stream wheel-odometry pose to pose_topic
+    "vio_pose_topic": "r2/slam/odom/tip/pose",  # pose_source=vio: subscribe to rover_vio's pose here
+    "publish_pose": True,           # stream wheel-odometry pose to pose_topic (wheel source only)
     "pose_rate_limit": 10.0,        # pose publish cap (Hz); null = every odom sample
     "pose_frame_id": "odom",        # header.frame_id in the published pose
     "battery_topic": "rover/battery",  # bridge publishes battery charge % here ({"data": pct})
@@ -192,6 +194,9 @@ def _validate(cfg: SimpleNamespace) -> None:
     if cfg.camera not in ("oakd", "realsense"):
         log.error("--camera must be 'oakd' or 'realsense', got %r", cfg.camera)
         sys.exit(1)
+    if cfg.pose_source not in ("wheel", "vio"):
+        log.error("--pose-source must be 'wheel' or 'vio', got %r", cfg.pose_source)
+        sys.exit(1)
     if cfg.publish_rate <= 2.0:
         log.warning("publish_rate=%.1f Hz is at/below the firmware heartbeat window "
                     "(~2 Hz) — the rover may stutter-stop. Use 5-10 Hz.",
@@ -208,6 +213,12 @@ def main(argv=None) -> int:
         log.info("rover link: UART %s @ %d", cfg.uart_port, cfg.uart_baud)
     log.info("inference: action=%s ctrl=%s remote=%s camera_topic=%s",
              cfg.action_topic, cfg.ctrl_topic, cfg.remote_topic, cfg.camera_topic)
+    if cfg.pose_source == "vio":
+        log.info("pose source: VIO (subscribing %s); wheel-odom pose publish disabled",
+                 cfg.vio_pose_topic)
+    else:
+        log.info("pose source: wheel odometry (publish=%s -> %s)",
+                 cfg.publish_pose, cfg.pose_topic)
     if cfg.use_waypoints:
         log.info("arc steering: waypoint_index=%d advance=%d tolerance=%.2f m recompute=%s",
                  cfg.waypoint_index, cfg.max_waypoint_advance, cfg.waypoint_tolerance,

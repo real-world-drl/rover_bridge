@@ -48,6 +48,8 @@ class InferenceClient:
                  remote_topic: Optional[str] = "omnivla/remote",
                  camera_topic: Optional[str] = None, pose_topic: Optional[str] = None,
                  battery_topic: Optional[str] = None,
+                 vio_pose_topic: Optional[str] = None,
+                 on_vio_pose=None,
                  publisher: Optional[RepeatedCmdVelPublisher] = None,
                  follower: Optional[WaypointFollower] = None,
                  action_scale: float = 1.0):
@@ -67,6 +69,13 @@ class InferenceClient:
             battery_topic: topic this bridge publishes battery charge percentage
                 to (``{"data": pct, ...}`` JSON, matching ros_ws's Float32
                 charge_percentage). None disables it.
+            vio_pose_topic: topic to *subscribe* to for an external VIO pose
+                (rover_vio's PoseStamped JSON). Used when ``pose_source: vio``;
+                None disables the subscription. The inference broker is the same
+                one rover_vio publishes to.
+            on_vio_pose: callback invoked with the parsed VIO pose dict for each
+                ``vio_pose_topic`` message. The bridge extracts (x, y, yaw) and
+                feeds the waypoint follower.
             publisher: RepeatedCmdVelPublisher for the raw-velocity fallback and
                 stop commands.
             follower: WaypointFollower for waypoint trajectories (preferred).
@@ -82,6 +91,8 @@ class InferenceClient:
         self.camera_topic = camera_topic
         self.pose_topic = pose_topic
         self.battery_topic = battery_topic
+        self.vio_pose_topic = vio_pose_topic
+        self.on_vio_pose = on_vio_pose
         self.publisher = publisher
         self.follower = follower
         self.action_scale = action_scale
@@ -137,6 +148,10 @@ class InferenceClient:
                 client.subscribe(self.remote_topic)
                 log.info("subscribed to remote topic: %s (moves even while halted)",
                          self.remote_topic)
+            if self.vio_pose_topic:
+                client.subscribe(self.vio_pose_topic)
+                log.info("subscribed to VIO pose topic: %s (pose_source=vio)",
+                         self.vio_pose_topic)
         else:
             log.error("inference MQTT failed to connect (rc=%s)", rc)
 
@@ -150,6 +165,8 @@ class InferenceClient:
                 self._handle_ctrl(msg)
             elif self.remote_topic and msg.topic == self.remote_topic:
                 self._handle_remote(msg)
+            elif self.vio_pose_topic and msg.topic == self.vio_pose_topic:
+                self._handle_vio_pose(msg)
             else:
                 self._handle_action(msg)
         except Exception as e:
@@ -187,6 +204,19 @@ class InferenceClient:
                 log.info("START received on ctrl topic — already running (no-op)")
         else:
             log.warning("unrecognized ctrl payload (no action taken): %r", payload)
+
+    # --- VIO pose topic -----------------------------------------------------
+
+    def _handle_vio_pose(self, msg):
+        """Forward an external VIO pose (rover_vio) to the bridge's callback."""
+        if not self.on_vio_pose:
+            return
+        try:
+            payload = json.loads(msg.payload)
+        except json.JSONDecodeError as e:
+            log.error("failed to parse VIO pose message as JSON: %s", e)
+            return
+        self.on_vio_pose(payload)
 
     # --- action topic -------------------------------------------------------
 

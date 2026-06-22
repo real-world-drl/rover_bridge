@@ -169,6 +169,23 @@ Each remote command also clears any in-flight waypoint trajectory so pose-driven
 advance can't override it. Send a steady stream of remote messages to keep
 driving.
 
+## Pose source: wheel odometry vs VIO
+
+`pose_source` selects what feeds the waypoint follower:
+
+- **`wheel`** (default) — integrate the rover's encoders (below); the bridge
+  publishes that pose to `pose_topic`.
+- **`vio`** — consume [`rover_vio`](../rover_vio)'s visual-inertial pose off MQTT
+  (`vio_pose_topic`, default `r2/slam/odom/tip/pose`) and feed it to the follower
+  instead. `rover_vio` owns that topic, so the bridge does **not** publish wheel
+  pose in this mode. Both frames are REP-103 (x-forward, y-left), so the follower
+  gets compatible poses either way. Wheel odometry still integrates (harmlessly)
+  but doesn't drive the follower.
+
+VIO is the more accurate source (wheel odometry drifts with slip); wheel is the
+zero-dependency fallback. There's no automatic failover — if VIO stops
+publishing, the follower simply stops getting fresh pose.
+
 ## Wheel odometry
 
 The rover's encoders work and `tel/wheel` carries cumulative signed ticks. The

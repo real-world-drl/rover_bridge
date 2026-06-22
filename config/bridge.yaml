@@ -34,7 +34,18 @@ ctrl_topic: omnivla/ctrl      # {"stop": true} / {"start": true}
 remote_topic: omnivla/remote
 camera_topic: r2/realsense       # bridge publishes frames here; the model subscribes
 
-# --- Pose streaming --------------------------------------------------------
+# --- Pose source -----------------------------------------------------------
+# What feeds the waypoint follower:
+#   wheel : integrate the rover's encoders (default); the bridge publishes that
+#           pose to pose_topic below.
+#   vio   : consume rover_vio's pose off MQTT (vio_pose_topic) and feed it to the
+#           follower instead. rover_vio owns the pose topic, so the bridge does
+#           NOT publish wheel pose in this mode. Both frames are REP-103
+#           (x-forward, y-left), so the follower gets compatible poses either way.
+pose_source: wheel
+vio_pose_topic: r2/slam/odom/tip/pose    # pose_source=vio: rover_vio publishes its VIO pose here
+
+# --- Pose streaming (wheel source) -----------------------------------------
 # Wheel-odometry pose, published to MQTT as PoseStamped-shaped JSON (same
 # format ros_ws forwards its SLAM pose in): {header, pose:{position, orientation}}.
 publish_pose: true
