@@ -15,7 +15,7 @@ transport: uart            # uart | mqtt
 
 # UART link (transport: uart). On a Pi 5, /dev/ttyAMA0 is shared with the BT
 # HCI by default — disable BT (use ttyAMA0) or enable a 2nd UART (use ttyAMA1).
-uart_port: /dev/ttyAMA10
+uart_port: /dev/ttyAMA0
 uart_baud: 921600
 
 # --- MQTT broker -----------------------------------------------------------
@@ -58,13 +58,13 @@ pose_frame_id: odom           # header.frame_id in the published message
 # curve. Published as {"data": pct, "voltage_v":.., "current_a":.., "cells":..}
 # — the "data" field matches ros_ws's Float32 charge_percentage shape.
 publish_battery: true
-battery_topic: rover/battery  # MQTT topic the charge percentage is published on
+battery_topic: spot/status/charge_percentage  # MQTT topic the charge percentage is published on
 battery_cells: 3              # series Li-ion cells (3S pack)
 
 # --- Camera ----------------------------------------------------------------
 camera: oakd                  # oakd (default) | realsense
 no_camera: false              # set true to disable capture (e.g. when running the logger)
-rate_limit: 1.0               # camera publish cap (Hz); null = uncapped
+rate_limit: 2.0               # camera publish cap (Hz); null = uncapped
 width: 1280                   # honored exactly by realsense; advisory for oakd
 height: 720
 fps: 15
@@ -75,9 +75,9 @@ crop_top_fraction: 0.5       # only used when crop_mode == top
 action_scale: 1.0             # multiplier on raw linear/angular (fallback path only)
 use_waypoints: true           # arc-steer on waypoints instead of raw velocities
 waypoint_index: 2             # initial target waypoint (0-indexed)
-actuation_duration: 2.0       # seconds the arc is meant to be driven (velocity scale)
-max_linear_velocity: 0.5      # m/s  — rover-scale cap (firmware also clamps)
-max_angular_velocity: 2.0     # rad/s
+actuation_duration: 1.0       # seconds the arc is meant to be driven (velocity scale)
+max_linear_velocity: 1.0      # m/s  — rover-scale cap (firmware also clamps)
+max_angular_velocity: 4.0     # rad/s
 turn_in_place_threshold_deg: 45.0  # pivot in place above this bearing (diff-drive)
 min_angular_velocity: 0.0     # dead-band on |angular.z| (rad/s); 0 disables
 
@@ -89,7 +89,7 @@ max_publishes: 20
 max_zero_publishes: 20
 
 # --- Pose-driven waypoint advance (pose = host wheel odometry) -------------
-max_waypoint_advance: 3       # extra waypoints to advance to per trajectory; 0 = none
+max_waypoint_advance: 5       # extra waypoints to advance to per trajectory; 0 = none
 waypoint_tolerance: 0.3       # metres within which a waypoint counts as reached
 recompute: true               # re-aim each buffer-phase command from latest pose
 max_action_age: null          # safety: stop if no fresh action within N s; null = off
@@ -97,7 +97,7 @@ max_action_age: null          # safety: stop if no fresh action within N s; null
 # --- Wheel odometry geometry (must match firmware Kconfig) -----------------
 wheel_diameter_mm: 80.0
 track_width_mm: 172.0
-encoder_ppr: 2100
+encoder_ppr: 1050
 publish_display: false        # feed host odometry pose back to the rover's OLED
 
 # --- Misc ------------------------------------------------------------------

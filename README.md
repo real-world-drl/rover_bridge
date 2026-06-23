@@ -40,6 +40,23 @@ telemetry back) is selectable via `--transport`.
 
 ## Install
 
+### uv (quickest)
+
+[`uv`](https://docs.astral.sh/uv/) creates the venv and installs deps on the
+first `uv run`, so there's no separate install step:
+
+```bash
+uv run --extra oakd rover-bridge --pose-source vio         # OAK-D Lite (default camera)
+uv run --extra realsense rover-bridge     # D435i
+uv run rover-bridge --no-camera           # core only (no camera SDK)
+```
+
+`rover-bridge` is the console entry point; `uv run python -m rover_bridge` is
+equivalent. Pre-install (and write a lockfile) with `uv sync --extra oakd` if
+you'd rather not install on first run. Camera SDKs are optional extras (lazy
+imports), so the core install runs without them — see the Pi 5 ARM notes below
+if `pyrealsense2` has no aarch64 wheel.
+
 ### Conda (Raspberry Pi 5 / the deployment target)
 
 The core deps are all on conda-forge for `linux-aarch64`; the camera SDKs are
@@ -76,6 +93,17 @@ hardware. `pyserial` is likewise only needed for the UART transport.
 > serial port without root.
 
 ## Run
+
+With `uv` (no activation needed; prefix any of the below with
+`uv run --extra oakd`):
+
+```bash
+# Defaults: UART link on /dev/ttyAMA0, OAK-D camera, broker localhost.
+# Auto-loads config/bridge.yaml. VIO pose source instead of wheel odometry:
+uv run --extra oakd rover-bridge --pose-source vio
+```
+
+Or with an activated env (conda / `pip install -e`), use `python -m rover_bridge`:
 
 ```bash
 # Defaults: UART link on /dev/ttyAMA0, OAK-D camera, broker localhost.
@@ -185,6 +213,15 @@ driving.
 VIO is the more accurate source (wheel odometry drifts with slip); wheel is the
 zero-dependency fallback. There's no automatic failover — if VIO stops
 publishing, the follower simply stops getting fresh pose.
+
+[`rover_vio`](../rover_vio) is the sibling project that produces the VIO pose —
+standalone OpenVINS on a RealSense D435i (no ROS), publishing the same
+`PoseStamped` JSON contract on the same broker. Build and run it on the rover,
+then start the bridge with `--pose-source vio`:
+
+```bash
+cd ../rover_vio && ./build/rover_vio    # stereo by default; publishes pose to r2/slam/odom/tip/pose
+```
 
 ## Wheel odometry
 
