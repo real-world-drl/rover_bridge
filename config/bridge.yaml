@@ -10,7 +10,7 @@
 
 # --- Rover link (selectable) ----------------------------------------------
 # How cmd_vel reaches the rover and how telemetry comes back. The inference
-# side (camera out, omnivla/act + omnivla/ctrl in) is always MQTT regardless.
+# side (camera out, gemnav/act + gemnav/ctrl in) is always MQTT regardless.
 transport: uart            # uart | mqtt
 
 # UART link (transport: uart). On a Pi 5, /dev/ttyAMA0 is shared with the BT
@@ -26,12 +26,12 @@ port: 1883
 robot_id: ugv01
 
 # --- Inference topics (same model / topics as the Spot setup) --------------
-action_topic: omnivla/act     # inference trajectories in
-ctrl_topic: omnivla/ctrl      # {"stop": true} / {"start": true}
+action_topic: gemnav/act     # inference trajectories in
+ctrl_topic: gemnav/ctrl      # {"stop": true} / {"start": true}
 # Manual remote teleop, e.g. {"linear": 0.3, "angular": 0.14}. These commands
 # move the rover even while the bridge is halted (waiting for a {"start": true})
 # — they bypass the inference halt state.
-remote_topic: omnivla/remote
+remote_topic: gemnav/remote
 camera_topic: r2/realsense       # bridge publishes frames here; the model subscribes
 
 # --- Pose source -----------------------------------------------------------

@@ -6,8 +6,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rover_bridge"
 version = "0.1.0"
-description = "OmniVLA inference bridge for the RoverLink differential rover (UART/MQTT)"
+description = "GemNav inference bridge for the RoverLink differential rover (UART/MQTT)"
 authors = [{ name = "Peter Bohm" }]
+license = { text = "Apache-2.0" }
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 requires-python = ">=3.9"
 dependencies = [
     "paho-mqtt>=1.6,<2.0",

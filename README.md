@@ -1,6 +1,6 @@
 # rover_bridge
 
-OmniVLA inference bridge for the **RoverLink** differential-drive rover.
+GemNav inference bridge for the **RoverLink** differential-drive rover.
 
 This is the sibling of `../../ros_ws` (the ROS↔MQTT bridge for Spot), rebuilt
 for a small differential rover that runs the [RoverLink](../RoverLink)
@@ -12,8 +12,8 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
 ## What it does
 
 ```
- camera ─crop/resize 224─▶ MQTT(camera_topic) ─▶  OmniVLA model
-   model ─MQTT(omnivla/act)─▶ bridge ─arc steering─▶ repeated cmd_vel
+ camera ─crop/resize 224─▶ MQTT(camera_topic) ─▶  GemNav model
+   model ─MQTT(gemnav/act)─▶ bridge ─arc steering─▶ repeated cmd_vel
         ─UART/MQTT─▶ rover         (also the firmware heartbeat)
    rover ─tel/wheel─▶ bridge ─wheel odometry─▶ pose ─▶ waypoint advance
                                                     └─MQTT(pose_topic)▶ consumers
@@ -22,13 +22,13 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
 1. **Camera → model.** Captures from an OAK-D Lite (default) or RealSense
    D435i, center/top/stretch-crops + resizes to 224×224 JPEG, and publishes to
    `camera_topic` for the inference client to consume.
-2. **Action → motion.** Subscribes to `omnivla/act`; converts the inference
+2. **Action → motion.** Subscribes to `gemnav/act`; converts the inference
    waypoint trajectory to `(linear, angular)` via pure-pursuit arc steering and
    republishes it as `cmd_vel` at a fixed rate. The repeated publish doubles as
    RoverLink's heartbeat (no `cmd_vel` within ~500 ms → the rover stops).
-3. **Stop/start.** `omnivla/ctrl` accepts `{"stop": true}` (immediate, sticky
+3. **Stop/start.** `gemnav/ctrl` accepts `{"stop": true}` (immediate, sticky
    halt) and `{"start": true}` (resume).
-4. **Remote teleop.** `omnivla/remote` accepts `{"linear": .., "angular": ..}`
+4. **Remote teleop.** `gemnav/remote` accepts `{"linear": .., "angular": ..}`
    and drives the rover manually — *even while halted* (see below).
 5. **Pose-driven advance.** The rover's encoders feed `tel/wheel`; the bridge
    integrates the cumulative ticks into `(x, y, yaw)` and advances through the
@@ -179,17 +179,17 @@ halts immediately and stays halted until `{"start": true}`.
 
 ## Remote teleop
 
-`remote_topic` (default `omnivla/remote`) lets an operator drive the rover
+`remote_topic` (default `gemnav/remote`) lets an operator drive the rover
 manually, independent of inference. It accepts `{"linear": 0.3, "angular":
 0.14}` — linear (m/s) and angular (rad/s) velocities, converted to `cmd_vel`
 and pushed through the same repeated publisher (so the heartbeat and buffer/zero
 phases still apply). Missing `linear`/`angular` default to 0.
 
 Remote velocities are multiplied by `action_scale` (default `1.0`, i.e. 1:1).
-`action_scale` is **shared** with inference actions on `omnivla/act`; there is
+`action_scale` is **shared** with inference actions on `gemnav/act`; there is
 no separate remote-only scale.
 
-Unlike actions on `omnivla/act`, remote commands **move the rover even while the
+Unlike actions on `gemnav/act`, remote commands **move the rover even while the
 bridge is halted** (i.e. after `{"stop": true}`, waiting for `{"start": true}`).
 They bypass the halt state but do **not** change it: once the command's
 republish buffer expires (see above) the rover stops and inference stays halted.

@@ -7,9 +7,9 @@ This is the "always MQTT" half of the bridge, ported from ``ros_ws``'s
 ``mqtt_client_manager.py``. It owns one MQTT client that:
 
 - publishes preprocessed camera frames to ``camera_topic`` (the model's input),
-- subscribes to ``action_topic`` (``omnivla/act``) for inference trajectories,
-- subscribes to ``ctrl_topic`` (``omnivla/ctrl``) for out-of-band stop/start,
-- subscribes to ``remote_topic`` (``omnivla/remote``) for manual teleop.
+- subscribes to ``action_topic`` (``gemnav/act``) for inference trajectories,
+- subscribes to ``ctrl_topic`` (``gemnav/ctrl``) for out-of-band stop/start,
+- subscribes to ``remote_topic`` (``gemnav/remote``) for manual teleop.
 
 Action payloads are JSON, identical to the Spot setup since it's the same
 model: ``{"waypoints": [[x, y, sin, cos], ...]}`` (preferred) or a raw
@@ -44,8 +44,8 @@ log = get_logger("inference")
 
 class InferenceClient:
     def __init__(self, broker: str, port: int = 1883, keepalive: int = 60,
-                 action_topic: str = "omnivla/act", ctrl_topic: str = "omnivla/ctrl",
-                 remote_topic: Optional[str] = "omnivla/remote",
+                 action_topic: str = "gemnav/act", ctrl_topic: str = "gemnav/ctrl",
+                 remote_topic: Optional[str] = "gemnav/remote",
                  camera_topic: Optional[str] = None, pose_topic: Optional[str] = None,
                  battery_topic: Optional[str] = None,
                  vio_pose_topic: Optional[str] = None,

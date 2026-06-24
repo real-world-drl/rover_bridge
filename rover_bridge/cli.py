@@ -36,9 +36,9 @@ DEFAULTS = {
     "uart_baud": 921600,
 
     # inference topics
-    "action_topic": "omnivla/act",
-    "ctrl_topic": "omnivla/ctrl",
-    "remote_topic": "omnivla/remote",  # manual teleop {"linear":..,"angular":..}; moves even while halted
+    "action_topic": "gemnav/act",
+    "ctrl_topic": "gemnav/ctrl",
+    "remote_topic": "gemnav/remote",  # manual teleop {"linear":..,"angular":..}; moves even while halted
     "camera_topic": "rover/cam",    # bridge publishes frames here; model subscribes
     "pose_source": "wheel",         # wheel | vio  — what feeds the waypoint follower
     "pose_topic": "rover/pose",     # bridge publishes odometry pose here (PoseStamped JSON)
@@ -143,7 +143,7 @@ def _load_yaml(path):
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rover_bridge",
-        description="OmniVLA inference bridge for the RoverLink differential rover.")
+        description="GemNav inference bridge for the RoverLink differential rover.")
     p.add_argument("--config", default=None,
                    help="YAML config path (default: bundled config/bridge.yaml; "
                         "pass '' to skip)")

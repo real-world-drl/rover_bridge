@@ -3,7 +3,7 @@
 
 """DepthAI OAK-D Lite color camera backend (the default).
 
-Only the RGB color stream is used — the same input the OmniVLA model trains
+Only the RGB color stream is used — the same input the GemNav model trains
 on. Depth is available on this device but unused here.
 
 Targets the DepthAI v3 API (``Camera.build`` + ``requestOutput`` +

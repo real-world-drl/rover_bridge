@@ -5,7 +5,7 @@ code in this repository.
 
 ## What this is
 
-**rover_bridge** — the host-side OmniVLA inference bridge for the RoverLink
+**rover_bridge** — the host-side GemNav inference bridge for the RoverLink
 differential rover. It is the non-ROS sibling of `../../ros_ws` (the Spot
 ROS↔MQTT bridge): same model, same MQTT inference contract, but it drives
 `../RoverLink` over that firmware's native binary `cmd_vel`/telemetry instead
@@ -32,7 +32,7 @@ and serial paths need real devices.
 
 `bridge.py:RoverBridge` wires five pieces. The **inference side is always MQTT**
 (`inference.py:InferenceClient`): it publishes preprocessed camera frames and
-subscribes to `omnivla/act` + `omnivla/ctrl`. Actions flow action →
+subscribes to `gemnav/act` + `gemnav/ctrl`. Actions flow action →
 `WaypointFollower` (arc steering) → `RepeatedCmdVelPublisher` → the **rover
 transport**. The rover transport is the *only* selectable link — `transports/`
 has a `RoverTransport` ABC with `uart.py` (default) and `mqtt.py`
@@ -53,7 +53,7 @@ change it on both sides and bump the topic version (`v1` → `v2`) rather than
 breaking the format in place. Don't invent a different CRC.
 
 ### The transport is the only thing `--transport` switches
-Camera-out, `omnivla/act`, and `omnivla/ctrl` are MQTT regardless of transport.
+Camera-out, `gemnav/act`, and `gemnav/ctrl` are MQTT regardless of transport.
 A common mistake would be to route inference I/O through the rover transport —
 don't. The rover MQTT transport (`transports/mqtt.py`) is a *separate* paho
 client from the inference client, even on the same broker, so the two concerns

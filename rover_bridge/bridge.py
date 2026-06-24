@@ -6,7 +6,7 @@
 Data flow (one direction of the loop each):
 
     camera ─preprocess─▶ inference.publish_camera ─MQTT▶ model
-    model ─MQTT(omnivla/act)▶ inference ─▶ waypoint follower / arc steering
+    model ─MQTT(gemnav/act)▶ inference ─▶ waypoint follower / arc steering
         ─▶ RepeatedCmdVelPublisher ─▶ transport.send_cmd_vel ─UART/MQTT▶ rover
     rover ─tel/wheel─▶ transport ─▶ wheel odometry ─pose─▶ waypoint follower
 
