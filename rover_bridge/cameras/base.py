@@ -33,7 +33,7 @@ class CameraSource(ABC):
                  rate_limit: Optional[float] = None,
                  width: int = 1280, height: int = 720, fps: int = 15,
                  crop_mode: str = "center", crop_top_fraction: float = 0.5,
-                 target_size: int = 224):
+                 target_size: int = 224, rotate: int = 0):
         """
         Args:
             publish: ``publish(jpeg_bytes)`` — sends a preprocessed frame onward.
@@ -42,12 +42,19 @@ class CameraSource(ABC):
             crop_mode: ``center`` | ``top`` | ``stretch``.
             crop_top_fraction: Bottom fraction kept when ``crop_mode == "top"``.
             target_size: Square model input size (default 224).
+            rotate: Clockwise rotation in degrees (0/90/180/270) applied to each
+                frame before crop/resize — e.g. 180 for an inverted mount.
         """
         self._publish = publish
         self.rate_limit = rate_limit
         self.width = width
         self.height = height
         self.fps = fps
+
+        if rotate not in (0, 90, 180, 270):
+            log.warning("invalid rotate=%s; expected 0/90/180/270, using 0", rotate)
+            rotate = 0
+        self.rotate = rotate
 
         if crop_mode not in VALID_CROP_MODES:
             log.warning("invalid crop_mode %r; falling back to 'center' (valid: %s)",
@@ -125,6 +132,12 @@ class CameraSource(ABC):
                 frame = self.read_rgb()
                 if frame is None:
                     continue
+
+                if self.rotate:
+                    # np.rot90 is CCW; map clockwise degrees to k. ascontiguous so
+                    # the rotated view encodes cleanly downstream.
+                    k = {90: 3, 180: 2, 270: 1}[self.rotate]
+                    frame = np.ascontiguousarray(np.rot90(frame, k))
 
                 img = Image.fromarray(frame, "RGB")
                 jpeg = preprocess_to_jpeg(img, self.crop_mode, self.crop_top_fraction,

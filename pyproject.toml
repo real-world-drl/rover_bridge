@@ -24,6 +24,8 @@ dependencies = [
 # vendor SDKs. Install the one matching your hardware.
 oakd = ["depthai>=2.24"]
 realsense = ["pyrealsense2>=2.50"]
+# The picamera backend (--camera picamera) needs no Python package — it shells
+# out to the rpicam-vid binary (rpicam-apps), so there is no extra for it.
 
 [project.scripts]
 rover-bridge = "rover_bridge.cli:main"

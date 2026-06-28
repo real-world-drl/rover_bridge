@@ -121,6 +121,7 @@ class RoverBridge:
                 rate_limit=cfg.rate_limit,
                 width=cfg.width, height=cfg.height, fps=cfg.fps,
                 crop_mode=cfg.crop_mode, crop_top_fraction=cfg.crop_top_fraction,
+                rotate=cfg.rotate,
             )
 
     # --- pose / telemetry handlers -----------------------------------------

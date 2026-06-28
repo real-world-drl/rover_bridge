@@ -62,14 +62,15 @@ battery_topic: spot/status/charge_percentage  # MQTT topic the charge percentage
 battery_cells: 3              # series Li-ion cells (3S pack)
 
 # --- Camera ----------------------------------------------------------------
-camera: oakd                  # oakd (default) | realsense
+camera: picamera              # picamera (Pi Cam Module 3) | oakd | realsense
 no_camera: false              # set true to disable capture (e.g. when running the logger)
-rate_limit: 2.0               # camera publish cap (Hz); null = uncapped
+rate_limit: 3.0               # camera publish cap (Hz); null = uncapped
 width: 1280                   # honored exactly by realsense; advisory for oakd
 height: 720
 fps: 15
 crop_mode: stretch            # center | top | stretch
 crop_top_fraction: 0.5       # only used when crop_mode == top
+rotate: 180                   # 0/90/180/270 clockwise; 180 for this rover's inverted mount
 
 # --- Action handling / arc steering ----------------------------------------
 action_scale: 1.0             # multiplier on raw linear/angular (fallback path only)

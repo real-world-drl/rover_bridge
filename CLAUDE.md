@@ -75,9 +75,10 @@ signed; the integrator differences successive samples, so the first sample only
 establishes a baseline (no motion emitted).
 
 ### Camera SDKs and pyserial are imported lazily — keep them that way
-`depthai`, `pyrealsense2`, and `serial` are imported inside `open_device()` /
-`start()`, not at module top, so a host with only one camera (or MQTT-only) can
-still import and run. Don't hoist these imports to module scope.
+`depthai`, `pyrealsense2`, `picamera2`/`libcamera`, and `serial` are imported
+inside `open_device()` / `start()`, not at module top, so a host with only one
+camera (or MQTT-only) can still import and run. Don't hoist these imports to
+module scope.
 
 ### Differential drive changed two arc-steering defaults
 `turn_in_place_threshold_deg` is a real 45° (the rover pivots in place) rather
