@@ -51,7 +51,7 @@ DEFAULTS = {
     "battery_cells": 3,             # series Li-ion cells (3S pack) for the SoC estimate
 
     # camera
-    "camera": "oakd",               # oakd | realsense
+    "camera": "oakd",               # oakd | realsense | picamera
     "no_camera": False,             # disable capture (e.g. when running the logger)
     "rate_limit": 1.0,              # camera publish cap (Hz); null = uncapped
     "width": 1280,
@@ -59,6 +59,7 @@ DEFAULTS = {
     "fps": 15,
     "crop_mode": "center",          # center | top | stretch
     "crop_top_fraction": 0.5,
+    "rotate": 0,                    # 0/90/180/270 clockwise; 180 for an inverted mount
 
     # action handling / arc steering
     "action_scale": 1.0,
@@ -101,7 +102,7 @@ _FLOAT_KEYS = {"rate_limit", "crop_top_fraction", "action_scale", "actuation_dur
                "wheel_diameter_mm", "track_width_mm", "pose_rate_limit"}
 _INT_KEYS = {"port", "uart_baud", "width", "height", "fps", "waypoint_index",
              "max_publishes", "max_zero_publishes", "max_waypoint_advance",
-             "encoder_ppr", "battery_cells"}
+             "encoder_ppr", "battery_cells", "rotate"}
 
 
 def _default_config_path():
@@ -191,8 +192,8 @@ def _validate(cfg: SimpleNamespace) -> None:
     if cfg.transport not in ("uart", "mqtt"):
         log.error("--transport must be 'uart' or 'mqtt', got %r", cfg.transport)
         sys.exit(1)
-    if cfg.camera not in ("oakd", "realsense"):
-        log.error("--camera must be 'oakd' or 'realsense', got %r", cfg.camera)
+    if cfg.camera not in ("oakd", "realsense", "picamera"):
+        log.error("--camera must be 'oakd', 'realsense' or 'picamera', got %r", cfg.camera)
         sys.exit(1)
     if cfg.pose_source not in ("wheel", "vio"):
         log.error("--pose-source must be 'wheel' or 'vio', got %r", cfg.pose_source)

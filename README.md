@@ -48,6 +48,7 @@ first `uv run`, so there's no separate install step:
 ```bash
 uv run --extra oakd rover-bridge --pose-source vio         # OAK-D Lite (default camera)
 uv run --extra realsense rover-bridge     # D435i
+uv run rover-bridge --camera picamera     # Pi Camera Module 3 (needs rpicam-vid on PATH)
 uv run rover-bridge --no-camera           # core only (no camera SDK)
 ```
 
@@ -81,6 +82,7 @@ conda env update -f environment.yml --prune
 pip install -e .                  # core (paho-mqtt, pyserial, pillow, numpy, pyyaml)
 pip install -e '.[oakd]'          # + DepthAI for the OAK-D Lite (default camera)
 pip install -e '.[realsense]'     # + pyrealsense2 for the D435i
+# Pi Camera Module 3 (--camera picamera) needs no extra — just rpicam-vid on PATH.
 ```
 
 Camera SDKs are imported lazily, so you only need the one matching your
@@ -88,9 +90,66 @@ hardware. `pyserial` is likewise only needed for the UART transport.
 
 > **Pi 5 notes.** `depthai` has ARM64 wheels and pip-installs cleanly;
 > `pyrealsense2` often has no prebuilt aarch64 wheel and may need librealsense
-> built from source. For the UART transport, add your user to the `dialout`
-> group (`sudo usermod -aG dialout $USER`, then re-login) so it can open the
-> serial port without root.
+> built from source. For the **Pi Camera Module 3**, the backend only needs the
+> `rpicam-vid` binary on `PATH` (see *Pi Camera Module 3 on Ubuntu 24.04* below).
+> No `picamera2`/`libcamera` Python bindings are required. For the UART
+> transport, add your user to the `dialout` group (`sudo usermod -aG dialout
+> $USER`, then re-login) so it can open the serial port without root.
+
+### Pi Camera Module 3 on Ubuntu 24.04 (Pi 5)
+
+The `--camera picamera` backend shells out to `rpicam-vid` (from `rpicam-apps`)
+and reads its MJPEG stdout, so the **only** requirement is the `rpicam-vid`
+binary on `PATH` — no `picamera2`, no `libcamera` Python bindings, and the venv
+needs no `--system-site-packages`.
+
+- **Raspberry Pi OS:** `sudo apt install rpicam-apps` — done.
+- **Ubuntu 24.04:** there are no Pi camera packages, and the Pi 5 ISP (PiSP) is
+  only supported by the *Raspberry Pi fork* of libcamera, so build both from
+  source (one-time):
+
+```bash
+# 1. Build dependencies
+sudo apt update
+sudo apt install -y git build-essential pkg-config meson ninja-build cmake \
+  python3-venv python3-dev python3-pip pybind11-dev \
+  libboost-dev libgnutls28-dev libssl-dev openssl libtiff-dev \
+  python3-ply python3-yaml \
+  libboost-program-options-dev libexif-dev libavcodec-dev \
+  i2c-tools v4l-utils libdrm-dev libjpeg-dev libpng-dev
+
+# 2. Enable the camera in firmware (use cam0/cam1 to match your connector)
+#    Add to /boot/firmware/config.txt, then reboot:
+#        camera_auto_detect=0
+#        dtoverlay=imx708,cam0
+sudo usermod -aG video $USER       # then: sudo reboot
+
+# 3. Build the Raspberry Pi libcamera fork (rpi/pisp = Pi 5 support)
+git clone https://github.com/raspberrypi/libcamera.git
+cd libcamera
+meson setup build --buildtype=release \
+  -Dpipelines=rpi/vc4,rpi/pisp -Dipas=rpi/vc4,rpi/pisp \
+  -Dv4l2=enabled -Dgstreamer=disabled -Dpycamera=disabled \
+  -Dtest=false -Dlc-compliance=disabled -Dcam=disabled -Dqcam=disabled \
+  -Ddocumentation=disabled
+ninja -C build && sudo ninja -C build install && sudo ldconfig
+cd ..
+
+# 4. Build rpicam-apps (provides rpicam-vid in /usr/local/bin)
+git clone https://github.com/raspberrypi/rpicam-apps.git
+cd rpicam-apps
+meson setup build --buildtype=release
+ninja -C build && sudo ninja -C build install && sudo ldconfig
+cd ..
+
+# 5. Verify before starting the bridge
+rpicam-hello --list-cameras        # must list the IMX708
+```
+
+> `-Dgstreamer=disabled -Dpycamera=disabled` trims the build to what this
+> backend needs (we use neither GStreamer nor the Python bindings); that also
+> lets you drop `libglib2.0-dev`/`libgstreamer-plugins-base1.0-dev` from step 1.
+> On a board with ≤1 GB RAM, append `-j 1` to the `ninja` commands.
 
 ## Run
 
@@ -112,6 +171,10 @@ python -m rover_bridge
 
 # MQTT rover link to a remote broker, RealSense camera:
 python -m rover_bridge --transport mqtt --broker mqtt-h --robot-id ugv01 --camera realsense
+
+# Pi Camera Module 3 (rpicam-vid); stretch crop matches the GemNav training crop.
+# --rotate 180 flips an inverted mount (rpicam's own flip flags are ignored on Pi 5).
+python -m rover_bridge --camera picamera --crop-mode stretch --rotate 180
 
 # Skip the YAML entirely (built-in defaults + CLI only):
 python -m rover_bridge --config ''
@@ -141,14 +204,30 @@ Bluetooth HCI by default. Either `dtoverlay=disable-bt` in
 
 ## Cameras
 
-`--camera oakd` (default) or `--camera realsense`. Both use only the RGB
-stream — the model's input. The shared preprocessing (`crop_mode` ∈
+`--camera oakd` (default), `--camera realsense`, or `--camera picamera`. All use
+only the RGB stream — the model's input. The shared preprocessing (`crop_mode` ∈
 `center|top|stretch`, then resize to 224×224 JPEG) matches training-time
 preprocessing, so frames are interchangeable across backends.
 
 - **OAK-D Lite** captures via the DepthAI v3 API (`Camera.requestOutput`), which
   ISP-scales to the exact `--width/--height`. The final inference frame is
   224×224 either way.
+- **Pi Camera Module 3** (`picamera`) captures by shelling out to `rpicam-vid`
+  (from `rpicam-apps`) and reading its MJPEG stdout — no `depthai`/`pyrealsense2`
+  and, deliberately, no `picamera2`/`libcamera` Python bindings (which aren't
+  packaged on Ubuntu). The only requirement is `rpicam-vid` on `PATH` (override
+  with `ROVER_RPICAM_BIN`; legacy `libcamera-vid` is auto-detected). Focus is
+  locked to infinity at startup so the lens never hunts while driving. The
+  Module 3 sensor is 16:9, so the default `1280×720` is the right aspect; the
+  backend forces a full-FOV sensor mode (`2304×1296`, overridable via
+  `ROVER_RPICAM_MODE`) so rpicam doesn't auto-pick a cropped-FOV mode. Match the
+  model's training crop with `--crop-mode stretch` for the current GemNav
+  checkpoint.
+- **Inverted mount?** rpicam-vid's `--rotation`/`--hflip`/`--vflip` are silently
+  ignored on the Pi 5 (PiSP) pipeline, so rotation is done in Python: set
+  `--rotate 180` (or `rotate:` in YAML). `--rotate` (0/90/180/270, clockwise) is
+  applied before crop/resize and works for **any** camera backend, not just the
+  Pi cam.
 - Capture is rate-limited by `--rate-limit` (Hz), sized to your inference rate.
 
 ## Arc steering & differential drive
