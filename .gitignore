@@ -49,3 +49,6 @@ Thumbs.db
 
 # Caches (e.g. DepthAI bootloader/blob cache)
 .cache/
+
+# Scratch (may hold WiFi PSKs / netplan profiles)
+tmp/
