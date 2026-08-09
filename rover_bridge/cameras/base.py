@@ -12,6 +12,7 @@ resize to the model's input size, JPEG encoding, and handing bytes to the
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -20,7 +21,7 @@ from typing import Callable, Optional
 import numpy as np
 from PIL import Image
 
-from ..logging_util import get_logger
+from ..logging_util import get_logger, log_throttle
 from .preprocess import VALID_CROP_MODES, preprocess_to_jpeg
 
 log = get_logger("camera")
@@ -73,6 +74,11 @@ class CameraSource(ABC):
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_publish: Optional[float] = None
+        # Publish-rate bookkeeping. Capture runs on its own thread with no
+        # dependency on telemetry or control, so this is the first thing to
+        # check when frames appear to stop for an unrelated-looking reason.
+        self._published = 0
+        self._rate_window_start: Optional[float] = None
 
     # --- backend hooks (public so tools like the data logger can reuse a
     # backend for raw, full-resolution capture without the threaded loop) ---
@@ -143,6 +149,19 @@ class CameraSource(ABC):
                 jpeg = preprocess_to_jpeg(img, self.crop_mode, self.crop_top_fraction,
                                           target_size=self.target_size)
                 self._publish(jpeg)
+
+                self._published += 1
+                now = time.monotonic()
+                if self._rate_window_start is None:
+                    self._rate_window_start = now
+                elapsed = now - self._rate_window_start
+                if elapsed >= 10.0:
+                    log.info("%s: published %d frame(s) in %.0f s (%.1f Hz)",
+                             self.name, self._published, elapsed,
+                             self._published / elapsed)
+                    self._published = 0
+                    self._rate_window_start = now
             except Exception as e:
-                log.error("error in %s capture loop: %s", self.name, e)
+                log_throttle(log, logging.ERROR, 5.0,
+                             f"error in {self.name} capture loop: {e}")
                 time.sleep(0.1)

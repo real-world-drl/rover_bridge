@@ -121,10 +121,13 @@ class PiCamera3(CameraSource):
         while True:
             ready, _, _ = select.select([fd], [], [], 5.0)
             if not ready:
-                return frame            # timeout — return what we have (maybe None)
+                # Timeout — hand back whatever we parsed. Must go through
+                # _decode like the normal path: the caller expects an RGB array,
+                # and returning raw JPEG bytes here throws in the capture loop.
+                return self._decode(frame) if frame is not None else None
             chunk = os.read(fd, 1 << 16)
             if not chunk:
-                return frame            # EOF
+                return self._decode(frame) if frame is not None else None  # EOF
             self._buf += chunk
             jpeg = self._take_last_jpeg()
             if jpeg is not None:
