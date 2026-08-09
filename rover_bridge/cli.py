@@ -220,13 +220,14 @@ def _validate(cfg: SimpleNamespace) -> None:
         sys.exit(1)
     if pub_pose and sub_vio and cfg.pose_topic == cfg.vio_pose_topic:
         log.error("pose_topic == vio_pose_topic (%r): the bridge would publish its "
-                  "own pose onto the topic it consumes rover_vio's pose from. Set "
+                  "own pose onto the topic it consumes the VIO pose from. Set "
                   "pose_topic to something else (e.g. gemnav/odometry).",
                   cfg.pose_topic)
         sys.exit(1)
     if pub_gt and cfg.gt_pose_topic == cfg.vio_pose_topic:
-        log.error("gt_pose_topic == vio_pose_topic (%r): rover_vio already owns "
-                  "that topic; republishing onto it adds a second publisher.",
+        log.error("gt_pose_topic == vio_pose_topic (%r): the VIO producer "
+                  "(rover_vio_iphone / rover_vio) already owns that topic; "
+                  "republishing onto it adds a second publisher.",
                   cfg.gt_pose_topic)
         sys.exit(1)
 

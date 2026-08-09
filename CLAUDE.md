@@ -75,8 +75,13 @@ in GemNav's docs is the REP-103 axis convention, not a compass).
 follower, the OLED, or anything else that affects motion; `_consume_gt_pose` is
 deliberately separate from `_consume_pose` for that reason. `pose_topic`,
 `gt_pose_topic` and `vio_pose_topic` must be three distinct topics (`cli._validate`
-enforces it): publishing onto the topic `rover_vio` owns puts two publishers on
-one topic and silently interleaves wheel and VIO poses.
+enforces it): publishing onto the topic the VIO producer owns puts two publishers
+on one topic and silently interleaves wheel and VIO poses.
+
+The VIO pose comes from `../rover_vio_iphone` (ARKit over Record3D — the one in
+use: no calibration, no stationary drift, survives bumps) or `../rover_vio`
+(OpenVINS/D435i, the fallback). Same wire format and same topic, so the bridge
+cannot tell them apart — which also means only one may run at a time.
 
 ### cmd_vel is the heartbeat — never let the publish rate drop near 2 Hz
 RoverLink zeroes the motors if no `cmd_vel` arrives within

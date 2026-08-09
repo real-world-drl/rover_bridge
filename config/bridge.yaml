@@ -43,17 +43,17 @@ goal_topic: gemnav/goal
 # --- Pose source -----------------------------------------------------------
 # Which source drives the waypoint follower (the ACTIVE pose):
 #   wheel : integrate the rover's encoders (default).
-#   vio   : consume rover_vio's pose off MQTT (vio_pose_topic) instead.
+#   vio   : consume the VIO pose off MQTT (vio_pose_topic) instead.
 # Both frames are REP-103 (x-forward, y-left), so the follower gets compatible
 # poses either way. Whichever source is NOT active becomes ground truth below.
 pose_source: wheel
-vio_pose_topic: gemnav/odometry_vio    # where rover_vio publishes its VIO pose
+vio_pose_topic: gemnav/odometry_vio    # where the VIO producer publishes (rover_vio_iphone / rover_vio)
 
 # --- Pose streaming --------------------------------------------------------
 # The ACTIVE pose, published as PoseStamped-shaped JSON (same format ros_ws
 # forwards odometry in): {header, pose:{position, orientation}}.
 # NOTE: pose_topic must NOT equal vio_pose_topic — that put the bridge's own
-# wheel odometry on the topic rover_vio publishes to, two publishers deep.
+# wheel odometry on the topic the VIO producer publishes to, two publishers deep.
 publish_pose: true
 pose_topic: gemnav/odometry   # MQTT topic the active pose is published on
 pose_rate_limit: 10.0         # publish cap (Hz); null = every odometry sample (~50 Hz)
@@ -61,7 +61,7 @@ pose_frame_id: odom           # header.frame_id in the published message
 
 # --- Ground truth (the source that is NOT driving the follower) ------------
 # With pose_source: wheel the rover navigates on encoders (which drift) while
-# rover_vio's pose is recorded alongside as the reference — republished here and
+# the VIO pose is recorded alongside as the reference — republished here and
 # logged below. It never touches the follower. With pose_source: vio the roles
 # swap and host wheel odometry becomes the ground-truth stream.
 publish_gt_pose: true

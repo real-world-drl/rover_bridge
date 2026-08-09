@@ -17,8 +17,8 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
         ─UART/MQTT─▶ rover         (also the firmware heartbeat)
    rover ─tel/wheel─▶ bridge ─wheel odometry─▶ pose ─▶ waypoint advance
                                                     └─MQTT(pose_topic)▶ consumers
- rover_vio ─MQTT(vio_pose_topic)─▶ bridge ─ground truth─▶ MQTT(gt_pose_topic)
-                                                       └─▶ SQLite pose log
+     VIO ─MQTT(vio_pose_topic)─▶ bridge ─ground truth─▶ MQTT(gt_pose_topic)
+                                                      └─▶ SQLite pose log
 ```
 
 1. **Camera → model.** Captures from a Pi Camera Module 3 (default), OAK-D Lite
@@ -58,7 +58,7 @@ topic below is a config key, so any of them can be renamed.
 | `gemnav/act` | in | inference waypoint trajectory |
 | `gemnav/ctrl` | in | `{"stop": true}` / `{"start": true}` |
 | `gemnav/remote` | in | manual teleop; moves even while halted |
-| `gemnav/odometry_vio` | in | `rover_vio`'s VIO pose (`vio_pose_topic`) |
+| `gemnav/odometry_vio` | in | VIO pose from `rover_vio_iphone` (or `rover_vio`) (`vio_pose_topic`) |
 | `gemnav/goal` | in | navigation goal; observed only (`goal_topic`) |
 
 On Spot `gemnav/odometry` likewise carries plain odometry — from the `slam`
@@ -356,20 +356,25 @@ keeps running as **ground truth**: republished to `gt_pose_topic` and/or logged,
 never fed back into control.
 
 - **`wheel`** (default) — integrate the rover's encoders (below). Ground truth is
-  then [`rover_vio`](../rover_vio)'s visual-inertial pose, consumed off
-  `vio_pose_topic` (default `gemnav/odometry_vio`).
-- **`vio`** — steer on `rover_vio`'s pose instead; host wheel odometry becomes the
+  then the visual-inertial pose consumed off `vio_pose_topic` (default
+  `gemnav/odometry_vio`), published by
+  [`rover_vio_iphone`](../rover_vio_iphone) or [`rover_vio`](../rover_vio).
+- **`vio`** — steer on that VIO pose instead; host wheel odometry becomes the
   ground-truth stream.
 
 Both frames are REP-103 (x-forward, y-left), so the follower gets compatible
-poses either way. VIO is the more accurate source (wheel odometry drifts with
-slip); wheel is the zero-dependency fallback. There's no automatic failover — if
-VIO stops publishing while it's active, the follower simply stops getting fresh
-pose.
+poses either way. VIO is the more accurate source — wheel odometry drifts with
+slip, while the ARKit pose shows no stationary drift and survives bumps — and
+wheel is the zero-dependency fallback that needs no second process.
+
+**There is no automatic failover.** If the active VIO producer stops publishing,
+the follower simply stops getting fresh pose; and a VIO that loses tracking may
+keep republishing a *stale* pose, which looks identical to a stationary rover
+from here. Nothing downstream notices either case.
 
 **The three pose topics must be distinct**, and the bridge refuses to start
-otherwise. Publishing to the topic `rover_vio` owns puts two publishers on one
-topic and silently interleaves wheel and VIO poses — the check exists because
+otherwise. Publishing to the topic the VIO producer owns puts two publishers on
+one topic and silently interleaves wheel and VIO poses — the check exists because
 that is exactly what the shipped config used to do.
 
 ### Ground truth: measuring wheel drift against VIO
@@ -378,8 +383,10 @@ To run an experiment on wheel odometry while recording VIO as the reference —
 the default configuration:
 
 ```bash
-cd ../rover_vio && ./build/rover_vio          # publishes VIO to gemnav/odometry_vio
-uv run rover-bridge --pose-log-db /data/record/rover/pose_log.db
+# publishes VIO to gemnav/odometry_vio (see "Which VIO producer" below)
+cd ../rover_vio_iphone && uv run --extra device rover-vio-iphone --broker darkhorse
+
+cd ../rover_bridge && uv run rover-bridge --pose-log-db /data/record/rover/pose_log.db
 ```
 
 The rover navigates on encoders; VIO is republished to `gemnav/odometry_gt` for
@@ -416,14 +423,30 @@ WHERE run_id = (SELECT MAX(id) FROM run) ORDER BY timestamp;
 Set `publish_gt_pose: false` and leave `pose_log_db` null to switch ground-truth
 capture off entirely; the bridge then doesn't subscribe to the VIO topic at all.
 
-[`rover_vio`](../rover_vio) is the sibling project that produces the VIO pose —
-standalone OpenVINS on a RealSense D435i (no ROS), publishing the same
-`PoseStamped` JSON contract on the same broker. Build and run it on the rover,
-then start the bridge with `--pose-source vio`:
+### Which VIO producer
+
+Two sibling projects publish that pose, in the same `PoseStamped` JSON contract
+on the same topic. The bridge cannot tell them apart, so run **one, never both** —
+two publishers on `gemnav/odometry_vio` silently interleave poses from different
+frames.
+
+- **[`rover_vio_iphone`](../rover_vio_iphone) — the one to use.** ARKit's pose
+  off an iPhone over USB (Record3D). Measured on the rover: ~17 Hz, no
+  stationary drift, and no bump-induced runaway. ARKit is factory-calibrated per
+  device, so there is no calibration step at all.
+- **[`rover_vio`](../rover_vio)** — standalone OpenVINS on a RealSense D435i (no
+  ROS). Still supported, and the fallback if no phone is available, but it needs
+  a Kalibr cam-IMU solve and ZUPT tuning, and it can run away after the rover
+  hits an obstacle.
 
 ```bash
-cd ../rover_vio && ./build/rover_vio    # stereo by default; publishes pose to gemnav/odometry_vio
+cd ../rover_vio_iphone && uv run --extra device rover-vio-iphone --broker darkhorse
+# or the D435i path:
+cd ../rover_vio && ./build/rover_vio     # stereo by default
 ```
+
+Then start the bridge — with `--pose-source vio` to steer on it, or with the
+default `wheel` to record it as ground truth.
 
 ## Wheel odometry
 
@@ -506,8 +529,8 @@ Each session writes `images/<timestamp_ns>.jpg` and a `robot_telemetry` table
 (`timestamp, image_file, x, y, yaw, gt_x, gt_y, gt_yaw, gt_age_s`); rows are
 committed every tick.
 
-`--vio-pose-topic` subscribes to `rover_vio` (its own MQTT client, independent of
-the rover transport) and fills the `gt_*` columns with the most recent VIO pose
+`--vio-pose-topic` subscribes to the VIO producer (its own MQTT client,
+independent of the rover transport) and fills the `gt_*` columns with the most recent VIO pose
 at each tick. `gt_age_s` is how stale that sample was when the row was written —
 a large value means there's no usable ground truth for that row, and the columns
 are `NULL` when no VIO pose has arrived at all. This is the per-frame equivalent
