@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import yaml
 
-from .bridge import RoverBridge
+from .bridge import RoverBridge, gt_capture_enabled
 from .logging_util import get_logger, setup_logging
 
 log = get_logger("cli")
@@ -39,19 +39,26 @@ DEFAULTS = {
     "action_topic": "gemnav/act",
     "ctrl_topic": "gemnav/ctrl",
     "remote_topic": "gemnav/remote",  # manual teleop {"linear":..,"angular":..}; moves even while halted
-    "camera_topic": "rover/cam",    # bridge publishes frames here; model subscribes
+    "camera_topic": "gemnav/camera",  # bridge publishes frames here; model subscribes
+    "goal_topic": "gemnav/goal",    # observed (not acted on) to record the run's goal; '' disables
     "pose_source": "wheel",         # wheel | vio  — what feeds the waypoint follower
-    "pose_topic": "rover/pose",     # bridge publishes odometry pose here (PoseStamped JSON)
-    "vio_pose_topic": "r2/slam/odom/tip/pose",  # pose_source=vio: subscribe to rover_vio's pose here
-    "publish_pose": True,           # stream wheel-odometry pose to pose_topic (wheel source only)
+    "pose_topic": "gemnav/odometry",  # bridge publishes the ACTIVE pose here (PoseStamped JSON)
+    "vio_pose_topic": "gemnav/odometry_vio",  # where rover_vio publishes; subscribed as active or gt source
+    "publish_pose": True,           # stream the active pose to pose_topic
     "pose_rate_limit": 10.0,        # pose publish cap (Hz); null = every odom sample
     "pose_frame_id": "odom",        # header.frame_id in the published pose
-    "battery_topic": "rover/battery",  # bridge publishes battery charge % here ({"data": pct})
+    # Ground truth: the pose source that is NOT driving the follower, republished
+    # for comparison. wheel mode -> VIO here; vio mode -> wheel odometry here.
+    "gt_pose_topic": "gemnav/odometry_gt",  # bridge republishes the secondary pose here
+    "publish_gt_pose": True,        # republish the secondary pose to gt_pose_topic
+    "gt_pose_rate_limit": 10.0,     # gt pose publish cap (Hz); null = every sample
+    "pose_log_db": None,            # SQLite path; logs BOTH poses for offline drift analysis
+    "battery_topic": "gemnav/battery",  # bridge publishes battery charge % here ({"data": pct})
     "publish_battery": True,        # stream battery charge percentage to battery_topic
     "battery_cells": 3,             # series Li-ion cells (3S pack) for the SoC estimate
 
     # camera
-    "camera": "oakd",               # oakd | realsense | picamera
+    "camera": "picamera",           # picamera (Pi Cam Module 3) | oakd | realsense
     "no_camera": False,             # disable capture (e.g. when running the logger)
     "rate_limit": 1.0,              # camera publish cap (Hz); null = uncapped
     "width": 1280,
@@ -94,12 +101,13 @@ DEFAULTS = {
 
 # (flag_dest, type, help) for keys whose CLI type isn't a plain str/auto.
 _BOOL_KEYS = {"no_camera", "use_waypoints", "recompute", "publish_display",
-              "publish_pose", "publish_battery"}
+              "publish_pose", "publish_battery", "publish_gt_pose"}
 _FLOAT_KEYS = {"rate_limit", "crop_top_fraction", "action_scale", "actuation_duration",
                "max_linear_velocity", "max_angular_velocity",
                "turn_in_place_threshold_deg", "min_angular_velocity",
                "publish_rate", "waypoint_tolerance", "max_action_age",
-               "wheel_diameter_mm", "track_width_mm", "pose_rate_limit"}
+               "wheel_diameter_mm", "track_width_mm", "pose_rate_limit",
+               "gt_pose_rate_limit"}
 _INT_KEYS = {"port", "uart_baud", "width", "height", "fps", "waypoint_index",
              "max_publishes", "max_zero_publishes", "max_waypoint_advance",
              "encoder_ppr", "battery_cells", "rotate"}
@@ -193,11 +201,35 @@ def _validate(cfg: SimpleNamespace) -> None:
         log.error("--transport must be 'uart' or 'mqtt', got %r", cfg.transport)
         sys.exit(1)
     if cfg.camera not in ("oakd", "realsense", "picamera"):
-        log.error("--camera must be 'oakd', 'realsense' or 'picamera', got %r", cfg.camera)
+        log.error("--camera must be 'picamera', 'oakd' or 'realsense', got %r", cfg.camera)
         sys.exit(1)
     if cfg.pose_source not in ("wheel", "vio"):
         log.error("--pose-source must be 'wheel' or 'vio', got %r", cfg.pose_source)
         sys.exit(1)
+
+    # Pose topic wiring. The bridge publishes the active pose to pose_topic and
+    # the secondary (ground-truth) pose to gt_pose_topic, and subscribes to
+    # vio_pose_topic whenever VIO is either source. Overlapping topics would put
+    # two publishers on one topic, or feed our own pose back in as "VIO".
+    pub_pose = cfg.publish_pose and bool(cfg.pose_topic)
+    pub_gt = cfg.publish_gt_pose and bool(cfg.gt_pose_topic)
+    sub_vio = cfg.pose_source == "vio" or gt_capture_enabled(cfg)
+    if pub_pose and pub_gt and cfg.pose_topic == cfg.gt_pose_topic:
+        log.error("pose_topic and gt_pose_topic are both %r — the active and "
+                  "ground-truth poses would interleave on one topic", cfg.pose_topic)
+        sys.exit(1)
+    if pub_pose and sub_vio and cfg.pose_topic == cfg.vio_pose_topic:
+        log.error("pose_topic == vio_pose_topic (%r): the bridge would publish its "
+                  "own pose onto the topic it consumes rover_vio's pose from. Set "
+                  "pose_topic to something else (e.g. gemnav/odometry).",
+                  cfg.pose_topic)
+        sys.exit(1)
+    if pub_gt and cfg.gt_pose_topic == cfg.vio_pose_topic:
+        log.error("gt_pose_topic == vio_pose_topic (%r): rover_vio already owns "
+                  "that topic; republishing onto it adds a second publisher.",
+                  cfg.gt_pose_topic)
+        sys.exit(1)
+
     if cfg.publish_rate <= 2.0:
         log.warning("publish_rate=%.1f Hz is at/below the firmware heartbeat window "
                     "(~2 Hz) — the rover may stutter-stop. Use 5-10 Hz.",
@@ -214,12 +246,27 @@ def main(argv=None) -> int:
         log.info("rover link: UART %s @ %d", cfg.uart_port, cfg.uart_baud)
     log.info("inference: action=%s ctrl=%s remote=%s camera_topic=%s",
              cfg.action_topic, cfg.ctrl_topic, cfg.remote_topic, cfg.camera_topic)
+    if cfg.goal_topic:
+        log.info("goal: observing %s (the inference server consumes it directly)",
+                 cfg.goal_topic)
+    active, secondary = ("VIO", "wheel odometry") if cfg.pose_source == "vio" \
+        else ("wheel odometry", "VIO")
     if cfg.pose_source == "vio":
-        log.info("pose source: VIO (subscribing %s); wheel-odom pose publish disabled",
+        log.info("pose source: VIO (subscribing %s) drives the follower",
                  cfg.vio_pose_topic)
     else:
-        log.info("pose source: wheel odometry (publish=%s -> %s)",
-                 cfg.publish_pose, cfg.pose_topic)
+        log.info("pose source: wheel odometry drives the follower")
+    if cfg.publish_pose and cfg.pose_topic:
+        log.info("active pose (%s) -> %s", active, cfg.pose_topic)
+    if gt_capture_enabled(cfg):
+        if cfg.pose_source == "wheel":
+            log.info("ground truth: %s from %s", secondary, cfg.vio_pose_topic)
+        else:
+            log.info("ground truth: %s (host-integrated)", secondary)
+        if cfg.publish_gt_pose and cfg.gt_pose_topic:
+            log.info("ground-truth pose (%s) -> %s", secondary, cfg.gt_pose_topic)
+        if cfg.pose_log_db:
+            log.info("pose log: both sources -> %s", cfg.pose_log_db)
     if cfg.use_waypoints:
         log.info("arc steering: waypoint_index=%d advance=%d tolerance=%.2f m recompute=%s",
                  cfg.waypoint_index, cfg.max_waypoint_advance, cfg.waypoint_tolerance,

@@ -17,11 +17,13 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
         ─UART/MQTT─▶ rover         (also the firmware heartbeat)
    rover ─tel/wheel─▶ bridge ─wheel odometry─▶ pose ─▶ waypoint advance
                                                     └─MQTT(pose_topic)▶ consumers
+ rover_vio ─MQTT(vio_pose_topic)─▶ bridge ─ground truth─▶ MQTT(gt_pose_topic)
+                                                       └─▶ SQLite pose log
 ```
 
-1. **Camera → model.** Captures from an OAK-D Lite (default) or RealSense
-   D435i, center/top/stretch-crops + resizes to 224×224 JPEG, and publishes to
-   `camera_topic` for the inference client to consume.
+1. **Camera → model.** Captures from a Pi Camera Module 3 (default), OAK-D Lite
+   or RealSense D435i, center/top/stretch-crops + resizes to 224×224 JPEG, and
+   publishes to `camera_topic` for the inference client to consume.
 2. **Action → motion.** Subscribes to `gemnav/act`; converts the inference
    waypoint trajectory to `(linear, angular)` via pure-pursuit arc steering and
    republishes it as `cmd_vel` at a fixed rate. The repeated publish doubles as
@@ -34,9 +36,72 @@ same MQTT topics — only the robot link changes: instead of publishing a ROS
    integrates the cumulative ticks into `(x, y, yaw)` and advances through the
    trajectory's waypoints as the rover reaches each one — smoothing over
    inference latency.
+6. **Ground truth.** Whichever pose source isn't steering (VIO by default) is
+   republished to `gt_pose_topic` and optionally logged to SQLite alongside the
+   active one, so encoder drift can be measured against a reference.
 
 The **inference side is always MQTT**. Only the **rover link** (cmd_vel out,
 telemetry back) is selectable via `--transport`.
+
+### MQTT contract
+
+The `gemnav/*` names are shared across robots — the same off-board inference
+client drives Spot (via [`ros_ws`](../../ros_ws)) or this rover unchanged. Every
+topic below is a config key, so any of them can be renamed.
+
+| Topic | dir | Payload |
+|---|---|---|
+| `gemnav/camera` | out | 224×224 JPEG (`camera_topic`) |
+| `gemnav/odometry` | out | active pose, PoseStamped JSON (`pose_topic`) |
+| `gemnav/odometry_gt` | out | ground-truth pose, same format (`gt_pose_topic`) |
+| `gemnav/battery` | out | `{"data": pct, ...}` (`battery_topic`) |
+| `gemnav/act` | in | inference waypoint trajectory |
+| `gemnav/ctrl` | in | `{"stop": true}` / `{"start": true}` |
+| `gemnav/remote` | in | manual teleop; moves even while halted |
+| `gemnav/odometry_vio` | in | `rover_vio`'s VIO pose (`vio_pose_topic`) |
+| `gemnav/goal` | in | navigation goal; observed only (`goal_topic`) |
+
+On Spot `gemnav/odometry` likewise carries plain odometry — from the `slam`
+package's odom output, not a SLAM-corrected pose.
+
+### Observations and the goal
+
+**Nothing here assembles `gemnav/obs`** — the inference server builds
+observations itself. `vla_gemma.stream` defaults to *direct-obs* mode, where it
+subscribes to the raw topics (`stream.py`: `--image-topic gemnav/camera`,
+`--pose-topic gemnav/odometry`, `--goal-topic gemnav/goal`) and skips the
+base64 repackaging hop the retired `spot_client` used to do. Those defaults are
+this bridge's contract, so no flags are needed on either side:
+
+```bash
+# inference host — direct-obs is the default
+python -m vla_gemma.stream --backend onnx --config configs/default.yaml --host darkhorse
+
+# set the goal once; it is published RETAINED, so the server picks it up
+# whenever it connects
+python -m vla_gemma.goal_client --host darkhorse -gx 13.5 -gy 1.0
+```
+
+The formats line up as: camera = **raw binary JPEG** (which is also the server's
+inference trigger), odometry = PoseStamped JSON, goal = retained JSON. A server
+run with `--image-topic none` falls back to packaged obs from an external
+producer — this bridge doesn't provide one.
+
+**Goal frame.** `goal_world_x/y` is expressed in the same frame as the pose on
+`pose_topic`, and the server re-projects it to body frame every tick. GemNav's
+docs call that frame "global ROS-NWU, x=North" — that's the REP-103 axis
+convention (x forward, y left), *not* a compass heading. The origin is wherever
+odometry started, on Spot as much as here: restart the odometry and `(0,0,0)`
+moves with it. So goals are start-pose-relative metres, and need re-issuing
+after a restart. Switching `pose_source` also moves the origin, since VIO
+initialises its own.
+
+**The bridge only observes the goal** — it never acts on it; the server does the
+projection. It records each goal onto the run in the pose log (`goal_log` table
+plus `run.goal`), so a recorded experiment says what it was driving to. A base64
+`goal_image` is fingerprinted (`goal_image_sha256` + `goal_image_b64_len`)
+rather than stored whole, which keeps a 260 KB inline image at ~160 bytes on
+disk while still identifying it. Set `goal_topic: ''` to not subscribe at all.
 
 ## Install
 
@@ -46,15 +111,16 @@ telemetry back) is selectable via `--transport`.
 first `uv run`, so there's no separate install step:
 
 ```bash
-uv run --extra oakd rover-bridge --pose-source vio         # OAK-D Lite (default camera)
+uv run rover-bridge                       # Pi Camera Module 3 (default; needs rpicam-vid on PATH)
+uv run --extra oakd rover-bridge          # OAK-D Lite
 uv run --extra realsense rover-bridge     # D435i
-uv run rover-bridge --camera picamera     # Pi Camera Module 3 (needs rpicam-vid on PATH)
-uv run rover-bridge --no-camera           # core only (no camera SDK)
+uv run rover-bridge --no-camera           # core only (no camera at all)
 ```
 
 `rover-bridge` is the console entry point; `uv run python -m rover_bridge` is
-equivalent. Pre-install (and write a lockfile) with `uv sync --extra oakd` if
-you'd rather not install on first run. Camera SDKs are optional extras (lazy
+equivalent. The default camera needs no extra — only the `rpicam-vid` binary on
+`PATH`. Pre-install (and write a lockfile) with `uv sync` if you'd rather not
+install on first run. The OAK-D / RealSense SDKs are optional extras (lazy
 imports), so the core install runs without them — see the Pi 5 ARM notes below
 if `pyrealsense2` has no aarch64 wheel.
 
@@ -67,7 +133,8 @@ hardware via pip afterward.
 ```bash
 conda env create -f environment.yml
 conda activate rover_bridge
-pip install -e '.[oakd]'          # OR  pip install -e '.[realsense]'
+pip install -e '.[oakd]'          # only for an OAK-D; '.[realsense]' for a D435i.
+                                  # The default Pi Camera Module 3 needs neither.
 ```
 
 Update the env after editing `environment.yml`:
@@ -80,9 +147,10 @@ conda env update -f environment.yml --prune
 
 ```bash
 pip install -e .                  # core (paho-mqtt, pyserial, pillow, numpy, pyyaml)
-pip install -e '.[oakd]'          # + DepthAI for the OAK-D Lite (default camera)
+                                  # — enough for the default Pi Camera Module 3,
+                                  #   which needs only rpicam-vid on PATH.
+pip install -e '.[oakd]'          # + DepthAI for the OAK-D Lite
 pip install -e '.[realsense]'     # + pyrealsense2 for the D435i
-# Pi Camera Module 3 (--camera picamera) needs no extra — just rpicam-vid on PATH.
 ```
 
 Camera SDKs are imported lazily, so you only need the one matching your
@@ -153,28 +221,32 @@ rpicam-hello --list-cameras        # must list the IMX708
 
 ## Run
 
-With `uv` (no activation needed; prefix any of the below with
-`uv run --extra oakd`):
+With `uv` (no activation needed):
 
 ```bash
-# Defaults: UART link on /dev/ttyAMA0, OAK-D camera, broker localhost.
-# Auto-loads config/bridge.yaml. VIO pose source instead of wheel odometry:
-uv run --extra oakd rover-bridge --pose-source vio
+# Defaults: UART link on /dev/ttyAMA0, Pi Camera Module 3, broker localhost.
+# Auto-loads config/bridge.yaml.
+uv run rover-bridge
+
+# VIO as the active pose source instead of wheel odometry:
+uv run rover-bridge --pose-source vio
 ```
 
 Or with an activated env (conda / `pip install -e`), use `python -m rover_bridge`:
 
 ```bash
-# Defaults: UART link on /dev/ttyAMA0, OAK-D camera, broker localhost.
-# Auto-loads config/bridge.yaml.
+# Defaults: UART link on /dev/ttyAMA0, Pi Camera Module 3, broker localhost.
+# Auto-loads config/bridge.yaml. The YAML's stretch crop matches the GemNav
+# training crop; --rotate 180 flips this rover's inverted mount (rpicam's own
+# flip flags are ignored on Pi 5).
 python -m rover_bridge
 
-# MQTT rover link to a remote broker, RealSense camera:
-python -m rover_bridge --transport mqtt --broker mqtt-h --robot-id ugv01 --camera realsense
+# MQTT rover link to a remote broker:
+python -m rover_bridge --transport mqtt --broker mqtt-h --robot-id ugv01
 
-# Pi Camera Module 3 (rpicam-vid); stretch crop matches the GemNav training crop.
-# --rotate 180 flips an inverted mount (rpicam's own flip flags are ignored on Pi 5).
-python -m rover_bridge --camera picamera --crop-mode stretch --rotate 180
+# Other cameras (installed as extras):
+python -m rover_bridge --camera oakd
+python -m rover_bridge --camera realsense
 
 # Skip the YAML entirely (built-in defaults + CLI only):
 python -m rover_bridge --config ''
@@ -204,15 +276,12 @@ Bluetooth HCI by default. Either `dtoverlay=disable-bt` in
 
 ## Cameras
 
-`--camera oakd` (default), `--camera realsense`, or `--camera picamera`. All use
+`--camera picamera` (default), `--camera oakd`, or `--camera realsense`. All use
 only the RGB stream — the model's input. The shared preprocessing (`crop_mode` ∈
 `center|top|stretch`, then resize to 224×224 JPEG) matches training-time
 preprocessing, so frames are interchangeable across backends.
 
-- **OAK-D Lite** captures via the DepthAI v3 API (`Camera.requestOutput`), which
-  ISP-scales to the exact `--width/--height`. The final inference frame is
-  224×224 either way.
-- **Pi Camera Module 3** (`picamera`) captures by shelling out to `rpicam-vid`
+- **Pi Camera Module 3** (`picamera`, the default) captures by shelling out to `rpicam-vid`
   (from `rpicam-apps`) and reading its MJPEG stdout — no `depthai`/`pyrealsense2`
   and, deliberately, no `picamera2`/`libcamera` Python bindings (which aren't
   packaged on Ubuntu). The only requirement is `rpicam-vid` on `PATH` (override
@@ -223,6 +292,9 @@ preprocessing, so frames are interchangeable across backends.
   `ROVER_RPICAM_MODE`) so rpicam doesn't auto-pick a cropped-FOV mode. Match the
   model's training crop with `--crop-mode stretch` for the current GemNav
   checkpoint.
+- **OAK-D Lite** captures via the DepthAI v3 API (`Camera.requestOutput`), which
+  ISP-scales to the exact `--width/--height`. The final inference frame is
+  224×224 either way.
 - **Inverted mount?** rpicam-vid's `--rotation`/`--hflip`/`--vflip` are silently
   ignored on the Pi 5 (PiSP) pipeline, so rotation is done in Python: set
   `--rotate 180` (or `rotate:` in YAML). `--rotate` (0/90/180/270, clockwise) is
@@ -278,20 +350,71 @@ driving.
 
 ## Pose source: wheel odometry vs VIO
 
-`pose_source` selects what feeds the waypoint follower:
+Two pose sources can run at once. `pose_source` picks the **active** one — the
+one that steers the waypoint follower and goes out on `pose_topic`. The other
+keeps running as **ground truth**: republished to `gt_pose_topic` and/or logged,
+never fed back into control.
 
-- **`wheel`** (default) — integrate the rover's encoders (below); the bridge
-  publishes that pose to `pose_topic`.
-- **`vio`** — consume [`rover_vio`](../rover_vio)'s visual-inertial pose off MQTT
-  (`vio_pose_topic`, default `r2/slam/odom/tip/pose`) and feed it to the follower
-  instead. `rover_vio` owns that topic, so the bridge does **not** publish wheel
-  pose in this mode. Both frames are REP-103 (x-forward, y-left), so the follower
-  gets compatible poses either way. Wheel odometry still integrates (harmlessly)
-  but doesn't drive the follower.
+- **`wheel`** (default) — integrate the rover's encoders (below). Ground truth is
+  then [`rover_vio`](../rover_vio)'s visual-inertial pose, consumed off
+  `vio_pose_topic` (default `gemnav/odometry_vio`).
+- **`vio`** — steer on `rover_vio`'s pose instead; host wheel odometry becomes the
+  ground-truth stream.
 
-VIO is the more accurate source (wheel odometry drifts with slip); wheel is the
-zero-dependency fallback. There's no automatic failover — if VIO stops
-publishing, the follower simply stops getting fresh pose.
+Both frames are REP-103 (x-forward, y-left), so the follower gets compatible
+poses either way. VIO is the more accurate source (wheel odometry drifts with
+slip); wheel is the zero-dependency fallback. There's no automatic failover — if
+VIO stops publishing while it's active, the follower simply stops getting fresh
+pose.
+
+**The three pose topics must be distinct**, and the bridge refuses to start
+otherwise. Publishing to the topic `rover_vio` owns puts two publishers on one
+topic and silently interleaves wheel and VIO poses — the check exists because
+that is exactly what the shipped config used to do.
+
+### Ground truth: measuring wheel drift against VIO
+
+To run an experiment on wheel odometry while recording VIO as the reference —
+the default configuration:
+
+```bash
+cd ../rover_vio && ./build/rover_vio          # publishes VIO to gemnav/odometry_vio
+uv run rover-bridge --pose-log-db /data/record/rover/pose_log.db
+```
+
+The rover navigates on encoders; VIO is republished to `gemnav/odometry_gt` for
+live consumers and both streams land in SQLite for offline comparison:
+
+| Config | Default | Meaning |
+|---|---|---|
+| `publish_gt_pose` | `true` | republish the ground-truth pose |
+| `gt_pose_topic` | `gemnav/odometry_gt` | where it goes |
+| `gt_pose_rate_limit` | `10.0` Hz | publish cap; also caps the pose log |
+| `pose_log_db` | `null` | SQLite path; `null` disables logging |
+
+The log ([`rover_bridge/pose_log.py`](rover_bridge/pose_log.py)) writes from a
+background thread, so disk I/O can't stall the control path or the cmd_vel
+heartbeat; if it ever falls behind it drops samples and warns rather than growing
+memory. Each process run appends a `run` row, so one file can hold many
+experiments:
+
+```sql
+run(id, started_at, pose_source, note, goal)
+pose_log(id, run_id, timestamp, source, active, x, y, yaw)
+goal_log(id, run_id, timestamp, goal)
+```
+
+`source` is `wheel` or `vio`, `active` is 1 for whichever drove the follower, and
+`timestamp` is host wall clock in ns — the same clock the data logger stamps
+images with, so the two line up:
+
+```sql
+SELECT timestamp, source, x, y, yaw FROM pose_log
+WHERE run_id = (SELECT MAX(id) FROM run) ORDER BY timestamp;
+```
+
+Set `publish_gt_pose: false` and leave `pose_log_db` null to switch ground-truth
+capture off entirely; the bridge then doesn't subscribe to the VIO topic at all.
 
 [`rover_vio`](../rover_vio) is the sibling project that produces the VIO pose —
 standalone OpenVINS on a RealSense D435i (no ROS), publishing the same
@@ -299,7 +422,7 @@ standalone OpenVINS on a RealSense D435i (no ROS), publishing the same
 then start the bridge with `--pose-source vio`:
 
 ```bash
-cd ../rover_vio && ./build/rover_vio    # stereo by default; publishes pose to r2/slam/odom/tip/pose
+cd ../rover_vio && ./build/rover_vio    # stereo by default; publishes pose to gemnav/odometry_vio
 ```
 
 ## Wheel odometry
@@ -319,9 +442,10 @@ Set `publish_display: true` to feed this host pose back to the rover's OLED
 
 ### Pose streaming
 
-The odometry pose is also streamed to MQTT for the inference side / external
+The active pose is also streamed to MQTT for the inference side / external
 consumers, in the **same format ros_ws used** — a `geometry_msgs/PoseStamped`
-serialized to JSON:
+serialized to JSON. The ground-truth pose uses the identical format on
+`gt_pose_topic`:
 
 ```json
 {"header": {"seq": 0, "stamp": {"secs": 0, "nsecs": 0}, "frame_id": "odom"},
@@ -334,9 +458,12 @@ the standard CCW math convention; consumers apply their own heading convention,
 exactly as the data logger's `quat_to_rpy` does. Configure with:
 
 - `publish_pose` (default `true`) — enable/disable.
-- `pose_topic` (default `rover/pose`) — must match what the consumer subscribes to.
+- `pose_topic` (default `gemnav/odometry`) — must match what the consumer
+  subscribes to, and must differ from `vio_pose_topic` and `gt_pose_topic`. The
+  name matches the Spot bridge's `gemnav/odometry`, which likewise carries plain
+  odometry (from the `slam` package's odom output, not a SLAM-corrected pose).
 - `pose_rate_limit` (default `10.0` Hz; `null` = every ~50 Hz odometry sample).
-- `pose_frame_id` (default `odom`).
+- `pose_frame_id` (default `odom`) — also used for the ground-truth pose.
 
 ### Battery
 
@@ -348,7 +475,7 @@ it, with `data` matching ros_ws's `Float32` `charge_percentage` shape:
 {"data": 78.0, "voltage_v": 12.05, "current_a": 1.2, "cells": 3}
 ```
 
-- `publish_battery` (default `true`), `battery_topic` (default `rover/battery`).
+- `publish_battery` (default `true`), `battery_topic` (default `gemnav/battery`).
 - `battery_cells` (default `3`) — series Li-ion cells.
 
 The percentage comes from a per-cell **open-circuit-voltage** lookup
@@ -369,11 +496,23 @@ process.
 ```bash
 python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0
 python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0 \
-    --transport mqtt --broker mqtt-h --robot-id ugv01 --camera realsense
+    --transport mqtt --broker mqtt-h --robot-id ugv01 --camera oakd
+# with VIO ground truth alongside the wheel pose:
+python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0 \
+    --broker darkhorse --vio-pose-topic gemnav/odometry_vio
 ```
 
 Each session writes `images/<timestamp_ns>.jpg` and a `robot_telemetry` table
-(`timestamp, image_file, x, y, yaw`); rows are committed every tick.
+(`timestamp, image_file, x, y, yaw, gt_x, gt_y, gt_yaw, gt_age_s`); rows are
+committed every tick.
+
+`--vio-pose-topic` subscribes to `rover_vio` (its own MQTT client, independent of
+the rover transport) and fills the `gt_*` columns with the most recent VIO pose
+at each tick. `gt_age_s` is how stale that sample was when the row was written —
+a large value means there's no usable ground truth for that row, and the columns
+are `NULL` when no VIO pose has arrived at all. This is the per-frame equivalent
+of the bridge's `pose_log_db`; use the logger when you want images too, the
+bridge's log when you're recording a live inference run.
 
 ## Layout
 
@@ -381,12 +520,13 @@ Each session writes `images/<timestamp_ns>.jpg` and a `robot_telemetry` table
 rover_bridge/
   wire.py            # RoverLink wire contract: pack/unpack, CRC8, UART framing FSM
   odometry.py        # diff-drive wheel odometry (ticks -> x,y,yaw)
+  pose_log.py        # SQLite log of both pose sources (drift analysis)
   inference.py       # always-MQTT side: camera publish + act/ctrl dispatch
   bridge.py          # orchestrator that wires it all together
   cli.py             # argparse + YAML config (CLI > YAML > default)
   transports/        # rover link: base ABC, uart, mqtt
   control/           # arc_steering, cmd_vel_publisher, waypoint_follower
-  cameras/           # base + oakd + realsense backends, shared preprocess
+  cameras/           # base + picamera + oakd + realsense backends, shared preprocess
 config/bridge.yaml   # checked-in defaults
 tools/data_logger.py # standalone recorder
 ```

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Peter Bohm
 
-"""DepthAI OAK-D Lite color camera backend (the default).
+"""DepthAI OAK-D Lite color camera backend (``--camera oakd``).
 
 Only the RGB color stream is used — the same input the GemNav model trains
 on. Depth is available on this device but unused here.

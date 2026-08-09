@@ -59,6 +59,25 @@ don't. The rover MQTT transport (`transports/mqtt.py`) is a *separate* paho
 client from the inference client, even on the same broker, so the two concerns
 stay decoupled.
 
+### Nothing here builds `gemnav/obs`, and the goal is observed, not acted on
+The inference server (`vla_gemma.stream`) runs *direct-obs* by default: it
+subscribes to `gemnav/camera` + `gemnav/odometry` + `gemnav/goal` itself. The
+old `spot_client` repackaging hop is retired — don't reintroduce an obs
+assembler here. `_on_goal` exists only to record what a logged run was driving
+to; the server does the body-frame projection. Goals live in the pose frame,
+whose origin is wherever odometry started (true on Spot too — "ROS-NWU x=North"
+in GemNav's docs is the REP-103 axis convention, not a compass).
+
+### Two pose sources run at once; only the active one may touch control
+`pose_source` picks the *active* pose (steers the follower, goes out on
+`pose_topic`). The other source keeps running as *ground truth* — republished to
+`gt_pose_topic`, optionally logged by `pose_log.py` — and must never reach the
+follower, the OLED, or anything else that affects motion; `_consume_gt_pose` is
+deliberately separate from `_consume_pose` for that reason. `pose_topic`,
+`gt_pose_topic` and `vio_pose_topic` must be three distinct topics (`cli._validate`
+enforces it): publishing onto the topic `rover_vio` owns puts two publishers on
+one topic and silently interleaves wheel and VIO poses.
+
 ### cmd_vel is the heartbeat — never let the publish rate drop near 2 Hz
 RoverLink zeroes the motors if no `cmd_vel` arrives within
 `UGV_HEARTBEAT_TIMEOUT_MS` (~500 ms). `RepeatedCmdVelPublisher` republishes at

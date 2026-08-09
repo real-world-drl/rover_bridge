@@ -6,7 +6,13 @@
 
 ROS-free port of ``ros_ws/src/scripts/data_logger.py``. Pose here comes from
 the rover's own wheel odometry (received over the same UART/MQTT transport the
-bridge uses) integrated on the host, rather than a ROS SLAM topic.
+bridge uses) integrated on the host, rather than a ROS odometry topic.
+
+Pass ``--vio-pose-topic`` to also record rover_vio's VIO pose as ground truth in
+the same rows (``gt_x``/``gt_y``/``gt_yaw``), so wheel drift can be measured
+against it offline. ``gt_age_s`` is how stale that VIO sample was when the row
+was written — treat a large value as "no usable ground truth here" (it is NULL
+when no VIO pose has arrived at all).
 
 Run it *instead of* the bridge (or with the bridge's ``--no-camera`` set): the
 camera can only be opened by one process. Each run writes::
@@ -21,10 +27,13 @@ are committed every tick so the DB survives an unexpected power-off.
 Usage:
     python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0
     python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0 \
-        --transport mqtt --broker mqtt-h --robot-id ugv01 --camera realsense
+        --transport mqtt --broker mqtt-h --robot-id ugv01 --camera oakd
+    python tools/data_logger.py --base-dir /data/record/rover --frequency 2.0 \
+        --broker darkhorse --vio-pose-topic gemnav/odometry_vio
 """
 
 import argparse
+import json
 import os
 import signal
 import sqlite3
@@ -40,10 +49,71 @@ from PIL import Image  # noqa: E402
 
 from rover_bridge.cameras import make_camera  # noqa: E402
 from rover_bridge.logging_util import get_logger, setup_logging  # noqa: E402
-from rover_bridge.odometry import WheelOdometry  # noqa: E402
+from rover_bridge.odometry import WheelOdometry, pose_from_stamped_dict  # noqa: E402
 from rover_bridge.transports import TelemetryCallbacks, make_transport  # noqa: E402
 
 log = get_logger("data_logger")
+
+
+class VioGroundTruth:
+    """Latest VIO pose from rover_vio, sampled per log row as ground truth.
+
+    A dedicated MQTT client, separate from the rover transport's (which may not
+    be MQTT at all) — same decoupling the bridge keeps between its inference and
+    rover clients. Holds only the most recent pose: the capture loop samples it,
+    it never queues.
+    """
+
+    def __init__(self, broker: str, port: int, topic: str, keepalive: int = 60):
+        self.broker, self.port, self.topic, self.keepalive = broker, port, topic, keepalive
+        self.client = None
+        self._lock = threading.Lock()
+        self._pose = None          # (x, y, yaw, received_ns)
+        self._seen = False
+
+    def start(self):
+        import paho.mqtt.client as mqtt  # lazy: only needed with --vio-pose-topic
+
+        self.client = mqtt.Client()
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+        log.info("connecting VIO ground-truth MQTT to %s:%d", self.broker, self.port)
+        self.client.connect(self.broker, self.port, self.keepalive)
+        self.client.loop_start()
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            client.subscribe(self.topic)
+            log.info("subscribed to VIO ground-truth topic: %s", self.topic)
+        else:
+            log.error("VIO ground-truth MQTT failed to connect (rc=%s)", rc)
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            x, y, yaw = pose_from_stamped_dict(json.loads(msg.payload))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            log.error("bad VIO pose payload on %s: %s", msg.topic, e)
+            return
+        if not self._seen:
+            self._seen = True
+            log.info("first VIO ground-truth pose received on %s", self.topic)
+        with self._lock:
+            self._pose = (x, y, yaw, time.time_ns())
+
+    def sample(self, now_ns: int):
+        """Return ``(x, y, yaw, age_s)`` or ``(None, None, None, None)``."""
+        with self._lock:
+            pose = self._pose
+        if pose is None:
+            return (None, None, None, None)
+        x, y, yaw, ts = pose
+        return (x, y, yaw, (now_ns - ts) / 1e9)
+
+    def stop(self):
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+            log.info("VIO ground-truth MQTT disconnected")
 
 
 class DataLogger:
@@ -65,6 +135,11 @@ class DataLogger:
         else:
             tkw = dict(broker=args.broker, port=args.port, robot_id=args.robot_id)
         self.transport = make_transport(args.transport, callbacks, **tkw)
+
+        # Optional VIO ground truth alongside the (drifting) wheel odometry.
+        self.vio = None
+        if args.vio_pose_topic:
+            self.vio = VioGroundTruth(args.broker, args.port, args.vio_pose_topic)
 
         # Reuse a camera backend for raw, full-resolution capture (publish is
         # unused here — we save frames to disk, not MQTT).
@@ -89,7 +164,11 @@ class DataLogger:
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   INTEGER,
                 image_file  TEXT,
-                x REAL, y REAL, yaw REAL
+                x REAL, y REAL, yaw REAL,
+                -- VIO ground truth (--vio-pose-topic); NULL when unused or not
+                -- yet received. gt_age_s = staleness of the VIO sample at the
+                -- moment this row was written.
+                gt_x REAL, gt_y REAL, gt_yaw REAL, gt_age_s REAL
             );
             """)
         self.conn.commit()
@@ -97,6 +176,8 @@ class DataLogger:
 
     def start(self):
         self.transport.start()
+        if self.vio:
+            self.vio.start()
         self.camera.open_device()
         self.running = True
         self.capture_thread = threading.Thread(target=self._loop, daemon=True)
@@ -113,13 +194,15 @@ class DataLogger:
                     continue
                 x, y, yaw = self.odometry.pose
                 timestamp_ns = time.time_ns()
+                gt_x, gt_y, gt_yaw, gt_age = (
+                    self.vio.sample(timestamp_ns) if self.vio else (None, None, None, None))
                 rel = os.path.join("images", f"{timestamp_ns}.jpg")
                 Image.fromarray(frame, "RGB").save(
                     os.path.join(self.session_dir, rel), format="JPEG", quality=85)
                 self.cursor.execute(
-                    "INSERT INTO robot_telemetry (timestamp, image_file, x, y, yaw) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (timestamp_ns, rel, x, y, yaw))
+                    "INSERT INTO robot_telemetry (timestamp, image_file, x, y, yaw, "
+                    "gt_x, gt_y, gt_yaw, gt_age_s) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (timestamp_ns, rel, x, y, yaw, gt_x, gt_y, gt_yaw, gt_age))
                 self.conn.commit()
 
                 next_t += period
@@ -141,6 +224,8 @@ class DataLogger:
             self.camera.close_device()
         except Exception as e:
             log.warning("error closing camera: %s", e)
+        if self.vio:
+            self.vio.stop()
         self.transport.stop()
         if self.conn:
             try:
@@ -162,7 +247,12 @@ def parse_args(argv=None):
     p.add_argument("--robot-id", default="ugv01")
     p.add_argument("--uart-port", default="/dev/ttyAMA0")
     p.add_argument("--uart-baud", type=int, default=921600)
-    p.add_argument("--camera", default="oakd", choices=["oakd", "realsense"])
+    p.add_argument("--vio-pose-topic", default=None,
+                   help="record rover_vio's VIO pose as ground truth (gt_* columns), "
+                        "e.g. gemnav/odometry_vio. Uses --broker/--port, and needs "
+                        "rover_vio running. Off by default.")
+    p.add_argument("--camera", default="picamera",
+                   choices=["picamera", "oakd", "realsense"])
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--fps", type=int, default=15)

@@ -47,9 +47,12 @@ class InferenceClient:
                  action_topic: str = "gemnav/act", ctrl_topic: str = "gemnav/ctrl",
                  remote_topic: Optional[str] = "gemnav/remote",
                  camera_topic: Optional[str] = None, pose_topic: Optional[str] = None,
+                 gt_pose_topic: Optional[str] = None,
                  battery_topic: Optional[str] = None,
                  vio_pose_topic: Optional[str] = None,
                  on_vio_pose=None,
+                 goal_topic: Optional[str] = None,
+                 on_goal=None,
                  publisher: Optional[RepeatedCmdVelPublisher] = None,
                  follower: Optional[WaypointFollower] = None,
                  action_scale: float = 1.0):
@@ -64,18 +67,31 @@ class InferenceClient:
                 without changing it. None disables it.
             camera_topic: topic this bridge publishes camera JPEGs to (the
                 model's input). The inference client must subscribe to the same.
-            pose_topic: topic this bridge publishes the rover's odometry pose to
-                (PoseStamped-shaped JSON, matching ros_ws). None disables it.
+            pose_topic: topic this bridge publishes the *active* pose to — the
+                one feeding the waypoint follower (PoseStamped-shaped JSON,
+                matching ros_ws). None disables it.
+            gt_pose_topic: topic this bridge publishes the *secondary* pose to —
+                the source not driving the follower, kept as a ground-truth
+                reference (VIO under ``pose_source: wheel``, wheel odometry
+                under ``pose_source: vio``). None disables it.
             battery_topic: topic this bridge publishes battery charge percentage
                 to (``{"data": pct, ...}`` JSON, matching ros_ws's Float32
                 charge_percentage). None disables it.
             vio_pose_topic: topic to *subscribe* to for an external VIO pose
-                (rover_vio's PoseStamped JSON). Used when ``pose_source: vio``;
-                None disables the subscription. The inference broker is the same
-                one rover_vio publishes to.
+                (rover_vio's PoseStamped JSON). Subscribed when VIO is either the
+                active source (``pose_source: vio``) or the ground-truth source
+                (``pose_source: wheel`` with ground-truth capture on); None
+                disables the subscription. The inference broker is the same one
+                rover_vio publishes to.
             on_vio_pose: callback invoked with the parsed VIO pose dict for each
                 ``vio_pose_topic`` message. The bridge extracts (x, y, yaw) and
-                feeds the waypoint follower.
+                either feeds the follower or records it as ground truth,
+                depending on ``pose_source``.
+            goal_topic: topic carrying the navigation goal (``gemnav/goal``,
+                published retained by ``vla_gemma.goal_client``). The bridge
+                only *observes* it — the inference server consumes the same
+                retained message directly. None disables the subscription.
+            on_goal: callback invoked with the parsed goal dict.
             publisher: RepeatedCmdVelPublisher for the raw-velocity fallback and
                 stop commands.
             follower: WaypointFollower for waypoint trajectories (preferred).
@@ -90,9 +106,12 @@ class InferenceClient:
         self.remote_topic = remote_topic
         self.camera_topic = camera_topic
         self.pose_topic = pose_topic
+        self.gt_pose_topic = gt_pose_topic
         self.battery_topic = battery_topic
         self.vio_pose_topic = vio_pose_topic
         self.on_vio_pose = on_vio_pose
+        self.goal_topic = goal_topic
+        self.on_goal = on_goal
         self.publisher = publisher
         self.follower = follower
         self.action_scale = action_scale
@@ -125,9 +144,14 @@ class InferenceClient:
             self.client.publish(self.camera_topic, jpeg, qos=0)
 
     def publish_pose(self, pose_json: str) -> None:
-        """Publish a pose message (JSON string). Wired to wheel odometry."""
+        """Publish the active pose (JSON string) — what drives the follower."""
         if self.client and self.pose_topic:
             self.client.publish(self.pose_topic, pose_json, qos=0)
+
+    def publish_gt_pose(self, pose_json: str) -> None:
+        """Publish the ground-truth pose (JSON string) — the secondary source."""
+        if self.client and self.gt_pose_topic:
+            self.client.publish(self.gt_pose_topic, pose_json, qos=0)
 
     def publish_battery(self, battery_json: str) -> None:
         """Publish a battery message (JSON string). Wired to battery telemetry."""
@@ -150,8 +174,10 @@ class InferenceClient:
                          self.remote_topic)
             if self.vio_pose_topic:
                 client.subscribe(self.vio_pose_topic)
-                log.info("subscribed to VIO pose topic: %s (pose_source=vio)",
-                         self.vio_pose_topic)
+                log.info("subscribed to VIO pose topic: %s", self.vio_pose_topic)
+            if self.goal_topic:
+                client.subscribe(self.goal_topic)
+                log.info("subscribed to goal topic: %s (observe only)", self.goal_topic)
         else:
             log.error("inference MQTT failed to connect (rc=%s)", rc)
 
@@ -167,6 +193,8 @@ class InferenceClient:
                 self._handle_remote(msg)
             elif self.vio_pose_topic and msg.topic == self.vio_pose_topic:
                 self._handle_vio_pose(msg)
+            elif self.goal_topic and msg.topic == self.goal_topic:
+                self._handle_goal(msg)
             else:
                 self._handle_action(msg)
         except Exception as e:
@@ -217,6 +245,27 @@ class InferenceClient:
             log.error("failed to parse VIO pose message as JSON: %s", e)
             return
         self.on_vio_pose(payload)
+
+    # --- goal topic ---------------------------------------------------------
+
+    def _handle_goal(self, msg):
+        """Forward a goal message to the bridge's callback.
+
+        The bridge does not act on the goal — the inference server reads the
+        same retained message and does the body-frame projection itself. This
+        exists so a recorded run knows what it was driving to.
+        """
+        if not self.on_goal:
+            return
+        try:
+            payload = json.loads(msg.payload)
+        except json.JSONDecodeError as e:
+            log.error("failed to parse goal message as JSON: %s", e)
+            return
+        if not isinstance(payload, dict):
+            log.warning("unrecognized goal payload (expected JSON object): %r", payload)
+            return
+        self.on_goal(payload)
 
     # --- action topic -------------------------------------------------------
 

@@ -12,10 +12,17 @@ Data flow (one direction of the loop each):
 
 The rover transport is selectable (UART default, MQTT alternative); everything
 on the inference side is MQTT regardless.
+
+Two pose sources can run at once. ``pose_source`` picks the *active* one — it
+steers the follower and goes out on ``pose_topic``. The other keeps running as
+*ground truth*: republished to ``gt_pose_topic`` and/or logged to SQLite, but
+never fed back into control. Running on wheel odometry with VIO as ground truth
+is how encoder drift gets measured against a reference on the same timeline.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -28,9 +35,53 @@ from .control import ArcSteering, RepeatedCmdVelPublisher, WaypointFollower
 from .inference import InferenceClient
 from .logging_util import get_logger, log_throttle
 from .odometry import WheelOdometry, pose_from_stamped_dict, pose_stamped_dict
+from .pose_log import PoseLog
 from .transports import TelemetryCallbacks, make_transport
 
 log = get_logger("bridge")
+
+
+def redact_goal(payload: dict) -> dict:
+    """Replace a base64 goal image with a fingerprint.
+
+    ``gemnav/goal`` may carry a whole JPEG inline. Storing that in every log
+    would bloat the database for no analytical gain, but which image was used
+    still matters for reproducing a run — so keep a short hash and the size.
+    """
+    out = dict(payload)
+    img = out.pop("goal_image", None)
+    if img is not None:
+        raw = img.encode("utf-8") if isinstance(img, str) else bytes(img)
+        out["goal_image_sha256"] = hashlib.sha256(raw).hexdigest()[:16]
+        out["goal_image_b64_len"] = len(img)
+    return out
+
+
+def describe_goal(goal: dict) -> str:
+    """One-line human summary of a redacted goal, for the log."""
+    if goal.get("clear"):
+        return "cleared"
+    parts = []
+    if "goal_world_x" in goal and "goal_world_y" in goal:
+        parts.append(f"pose=({goal['goal_world_x']}, {goal['goal_world_y']})")
+    if "goal_image_sha256" in goal:
+        parts.append(f"image=sha256:{goal['goal_image_sha256']}")
+    if "scoring_goal_x" in goal:
+        parts.append(f"scoring=({goal['scoring_goal_x']}, {goal['scoring_goal_y']})"
+                     " [analysis only]")
+    return " ".join(parts) if parts else "empty"
+
+
+def gt_capture_enabled(cfg: SimpleNamespace) -> bool:
+    """True when the bridge should capture the *secondary* pose source as ground
+    truth — republish it to ``gt_pose_topic``, log it to ``pose_log_db``, or both.
+
+    Ground truth is whichever source is not driving the follower: VIO under
+    ``pose_source: wheel`` (the drift-comparison case), wheel odometry under
+    ``pose_source: vio``. Lives here rather than in ``cli`` because ``cli``
+    imports this module.
+    """
+    return bool(cfg.pose_log_db) or bool(cfg.publish_gt_pose and cfg.gt_pose_topic)
 
 
 class RoverBridge:
@@ -88,12 +139,26 @@ class RoverBridge:
         self.callbacks.on_status = self._on_status
         # IMU is high-rate and unused by the control loop; ignore by default.
 
-        # --- pose source: wheel odometry (default) or external VIO ----------
-        # With pose_source=vio the bridge consumes rover_vio's pose off MQTT and
-        # feeds it to the follower in place of wheel odometry; rover_vio owns the
-        # pose topic, so the bridge stops publishing wheel pose to it.
+        # --- pose sources: one drives the follower, the other is ground truth -
+        # pose_source picks the ACTIVE source (what the follower and pose_topic
+        # get). The other source keeps running as the GROUND-TRUTH reference:
+        # under `wheel` that's rover_vio's VIO pose off MQTT (the drift-
+        # comparison case), under `vio` it's host wheel odometry. Ground truth is
+        # republished to gt_pose_topic and/or logged, never fed to the follower.
         self._use_vio = cfg.pose_source == "vio"
+        self._active_source = "vio" if self._use_vio else "wheel"
+        self._gt_source = "wheel" if self._use_vio else "vio"
+        self._gt_enabled = gt_capture_enabled(cfg)
         self._vio_seen = False
+
+        # VIO is subscribed when it is either the active source or ground truth.
+        want_vio = self._use_vio or (self._gt_source == "vio" and self._gt_enabled)
+
+        # --- pose log (both sources, for offline drift analysis) ------------
+        self.pose_log = None
+        if cfg.pose_log_db:
+            self.pose_log = PoseLog(cfg.pose_log_db, pose_source=cfg.pose_source,
+                                    rate_limit=cfg.gt_pose_rate_limit)
 
         # --- inference MQTT side --------------------------------------------
         self.inference = InferenceClient(
@@ -101,17 +166,22 @@ class RoverBridge:
             action_topic=cfg.action_topic, ctrl_topic=cfg.ctrl_topic,
             remote_topic=cfg.remote_topic,
             camera_topic=cfg.camera_topic,
-            pose_topic=cfg.pose_topic if (cfg.publish_pose and not self._use_vio) else None,
+            pose_topic=cfg.pose_topic if cfg.publish_pose else None,
+            gt_pose_topic=cfg.gt_pose_topic if cfg.publish_gt_pose else None,
             battery_topic=cfg.battery_topic if cfg.publish_battery else None,
-            vio_pose_topic=cfg.vio_pose_topic if self._use_vio else None,
-            on_vio_pose=self._on_vio_pose if self._use_vio else None,
+            vio_pose_topic=cfg.vio_pose_topic if want_vio else None,
+            on_vio_pose=self._on_vio_pose if want_vio else None,
+            goal_topic=cfg.goal_topic or None,
+            on_goal=self._on_goal,
             publisher=self.publisher, follower=self.follower,
             action_scale=cfg.action_scale,
         )
 
-        # Pose streaming bookkeeping (rate-limited in _publish_pose).
+        # Pose streaming bookkeeping (rate-limited in _publish_pose/_publish_gt_pose).
         self._pose_seq = 0
         self._last_pose_pub = None
+        self._gt_pose_seq = 0
+        self._last_gt_pose_pub = None
 
         # --- camera ---------------------------------------------------------
         self.camera = None
@@ -135,14 +205,20 @@ class RoverBridge:
         self.odometry.update(telem)
 
     def _on_pose(self, x: float, y: float, yaw: float) -> None:
-        """Wheel-odometry pose callback. Drives the follower only when it is the
-        active source (wheel odometry still integrates in vio mode, harmlessly)."""
+        """Wheel-odometry pose callback. Drives the follower when wheel is the
+        active source; otherwise wheel odometry is the ground-truth stream."""
         if self._use_vio:
+            self._consume_gt_pose("wheel", x, y, yaw)
             return
         self._consume_pose(x, y, yaw, publish=self.cfg.publish_pose)
 
     def _on_vio_pose(self, payload: dict) -> None:
-        """External VIO pose (rover_vio) callback, used when pose_source=vio."""
+        """External VIO pose (rover_vio) callback.
+
+        Drives the follower under ``pose_source: vio``; under ``pose_source:
+        wheel`` the same stream is recorded as ground truth instead, so an
+        experiment can run on encoders while VIO measures how far they drifted.
+        """
         try:
             x, y, yaw = pose_from_stamped_dict(payload)
         except (KeyError, TypeError, ValueError) as e:
@@ -150,19 +226,62 @@ class RoverBridge:
             return
         if not self._vio_seen:
             self._vio_seen = True
-            log.info("first VIO pose received on %s — pose_source=vio active",
-                     self.cfg.vio_pose_topic)
-        # rover_vio already publishes this pose; the bridge only consumes it.
-        self._consume_pose(x, y, yaw, publish=False)
+            role = "active pose source" if self._use_vio else "ground truth"
+            log.info("first VIO pose received on %s — using it as %s",
+                     self.cfg.vio_pose_topic, role)
+        if self._use_vio:
+            self._consume_pose(x, y, yaw, publish=self.cfg.publish_pose)
+        else:
+            self._consume_gt_pose("vio", x, y, yaw)
+
+    def _on_goal(self, payload: dict) -> None:
+        """Observe ``gemnav/goal`` so a recorded run knows its goal.
+
+        The bridge never acts on this: the inference server subscribes to the
+        same retained message and re-projects the goal to body frame itself.
+        Arrives once on connect (it is retained), plus on every change.
+        """
+        goal = redact_goal(payload)
+        log.info("goal on %s: %s", self.cfg.goal_topic, describe_goal(goal))
+        if self.pose_log:
+            self.pose_log.record_goal(json.dumps(goal))
 
     def _consume_pose(self, x: float, y: float, yaw: float, publish: bool) -> None:
+        """Handle the ACTIVE pose: steer on it, show it, publish it, log it."""
         if self.follower:
             self.follower.update_pose(x, y, yaw)
+        if self.pose_log:
+            self.pose_log.record(self._active_source, x, y, yaw, active=True)
         if self.cfg.publish_display:
             # Feed the rover's OLED its host-authoritative pose.
             self.transport.send_cmd_display(x, y, yaw, 0.0, 0.0)
         if publish:
             self._publish_pose(x, y, yaw)
+
+    def _consume_gt_pose(self, source: str, x: float, y: float, yaw: float) -> None:
+        """Handle the GROUND-TRUTH pose: log and/or republish, never steer on it.
+
+        Deliberately does not touch the follower or the OLED — the whole point is
+        that it observes the run without influencing it.
+        """
+        if self.pose_log:
+            self.pose_log.record(source, x, y, yaw, active=False)
+        if not (self.cfg.publish_gt_pose and self.cfg.gt_pose_topic):
+            return
+        limit = self.cfg.gt_pose_rate_limit
+        if limit is not None:
+            now = time.monotonic()
+            if self._last_gt_pose_pub is not None and \
+                    (now - self._last_gt_pose_pub) < 1.0 / limit:
+                return
+            self._last_gt_pose_pub = now
+        msg = pose_stamped_dict(x, y, yaw, frame_id=self.cfg.pose_frame_id,
+                                seq=self._gt_pose_seq)
+        self._gt_pose_seq += 1
+        self.inference.publish_gt_pose(json.dumps(msg))
+        log_throttle(log, logging.INFO, 5.0,
+                     f"streaming ground truth ({source}) -> "
+                     f"{self.cfg.gt_pose_topic}: x={x:.2f} y={y:.2f} yaw={yaw:.2f}")
 
     def _publish_pose(self, x: float, y: float, yaw: float) -> None:
         """Stream odometry pose to MQTT (PoseStamped JSON), rate-limited.
@@ -221,4 +340,6 @@ class RoverBridge:
         self.inference.disconnect()
         self.publisher.stop()
         self.transport.stop()  # sends a final zero cmd_vel
+        if self.pose_log:
+            self.pose_log.close()
         log.info("rover bridge stopped")

@@ -25,44 +25,62 @@ port: 1883
 # Robot id; substituted into ugv/<id>/v1/... topics. Only used when transport: mqtt.
 robot_id: ugv01
 
-# --- Inference topics (same model / topics as the Spot setup) --------------
+# --- Inference topics ------------------------------------------------------
+# The gemnav/* names are the shared cross-robot contract: the same off-board
+# inference client drives Spot (via ros_ws) or this rover with no changes.
 action_topic: gemnav/act     # inference trajectories in
 ctrl_topic: gemnav/ctrl      # {"stop": true} / {"start": true}
 # Manual remote teleop, e.g. {"linear": 0.3, "angular": 0.14}. These commands
 # move the rover even while the bridge is halted (waiting for a {"start": true})
 # — they bypass the inference halt state.
 remote_topic: gemnav/remote
-camera_topic: r2/realsense       # bridge publishes frames here; the model subscribes
+camera_topic: gemnav/camera      # bridge publishes frames here; the model subscribes
+# The navigation goal, published retained by vla_gemma.goal_client. The
+# inference server consumes it directly — the bridge only OBSERVES it, to record
+# what each logged run was driving to. Set to '' to not even subscribe.
+goal_topic: gemnav/goal
 
 # --- Pose source -----------------------------------------------------------
-# What feeds the waypoint follower:
-#   wheel : integrate the rover's encoders (default); the bridge publishes that
-#           pose to pose_topic below.
-#   vio   : consume rover_vio's pose off MQTT (vio_pose_topic) and feed it to the
-#           follower instead. rover_vio owns the pose topic, so the bridge does
-#           NOT publish wheel pose in this mode. Both frames are REP-103
-#           (x-forward, y-left), so the follower gets compatible poses either way.
+# Which source drives the waypoint follower (the ACTIVE pose):
+#   wheel : integrate the rover's encoders (default).
+#   vio   : consume rover_vio's pose off MQTT (vio_pose_topic) instead.
+# Both frames are REP-103 (x-forward, y-left), so the follower gets compatible
+# poses either way. Whichever source is NOT active becomes ground truth below.
 pose_source: wheel
-vio_pose_topic: r2/slam/odom/tip/pose    # pose_source=vio: rover_vio publishes its VIO pose here
+vio_pose_topic: gemnav/odometry_vio    # where rover_vio publishes its VIO pose
 
-# --- Pose streaming (wheel source) -----------------------------------------
-# Wheel-odometry pose, published to MQTT as PoseStamped-shaped JSON (same
-# format ros_ws forwards its SLAM pose in): {header, pose:{position, orientation}}.
+# --- Pose streaming --------------------------------------------------------
+# The ACTIVE pose, published as PoseStamped-shaped JSON (same format ros_ws
+# forwards odometry in): {header, pose:{position, orientation}}.
+# NOTE: pose_topic must NOT equal vio_pose_topic — that put the bridge's own
+# wheel odometry on the topic rover_vio publishes to, two publishers deep.
 publish_pose: true
-pose_topic: r2/slam/odom/tip/pose        # MQTT topic the pose is published on
+pose_topic: gemnav/odometry   # MQTT topic the active pose is published on
 pose_rate_limit: 10.0         # publish cap (Hz); null = every odometry sample (~50 Hz)
 pose_frame_id: odom           # header.frame_id in the published message
+
+# --- Ground truth (the source that is NOT driving the follower) ------------
+# With pose_source: wheel the rover navigates on encoders (which drift) while
+# rover_vio's pose is recorded alongside as the reference — republished here and
+# logged below. It never touches the follower. With pose_source: vio the roles
+# swap and host wheel odometry becomes the ground-truth stream.
+publish_gt_pose: true
+gt_pose_topic: gemnav/odometry_gt   # ground-truth pose out; must differ from the two above
+gt_pose_rate_limit: 10.0            # publish cap (Hz); also caps the pose log
+# SQLite log of BOTH poses (run/pose_log tables) for offline drift analysis.
+# null disables it. Each run appends a new `run` row, so one file can hold many.
+pose_log_db: null             # e.g. /data/record/rover/pose_log.db
 
 # --- Battery ---------------------------------------------------------------
 # Charge percentage derived from pack voltage (tel/battery) via a Li-ion OCV
 # curve. Published as {"data": pct, "voltage_v":.., "current_a":.., "cells":..}
 # — the "data" field matches ros_ws's Float32 charge_percentage shape.
 publish_battery: true
-battery_topic: spot/status/charge_percentage  # MQTT topic the charge percentage is published on
+battery_topic: gemnav/battery # MQTT topic the charge percentage is published on
 battery_cells: 3              # series Li-ion cells (3S pack)
 
 # --- Camera ----------------------------------------------------------------
-camera: picamera              # picamera (Pi Cam Module 3) | oakd | realsense
+camera: picamera              # picamera (Pi Cam Module 3, default) | oakd | realsense
 no_camera: false              # set true to disable capture (e.g. when running the logger)
 rate_limit: 3.0               # camera publish cap (Hz); null = uncapped
 width: 1280                   # honored exactly by realsense; advisory for oakd
