@@ -59,6 +59,16 @@ don't. The rover MQTT transport (`transports/mqtt.py`) is a *separate* paho
 client from the inference client, even on the same broker, so the two concerns
 stay decoupled.
 
+### "The camera froze / it's laggy" — measure first, and read README Troubleshooting
+Three separate faults produced that same report and masked each other: WiFi
+power save on the rover (3 ms radio idling at 120-200 ms), capture back-pressure
+in the Pi cam backend (a 64 KB pipe drained at the publish rate stalls
+`rpicam-vid` itself), and a VIO producer outrunning USB (punctual delivery,
+rotting contents). Theorising picked the wrong one twice; `tools/mqtt_probe.py`
+settled it in 20 s each time. Note the two counter-intuitive tells: lowering the
+camera `fps` makes back-pressure *worse*, and a perfect arrival rate says
+nothing about whether the payload is stale.
+
 ### Nothing here builds `gemnav/obs`, and the goal is observed, not acted on
 The inference server (`vla_gemma.stream`) runs *direct-obs* by default: it
 subscribes to `gemnav/camera` + `gemnav/odometry` + `gemnav/goal` itself. The

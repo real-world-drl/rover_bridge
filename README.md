@@ -537,6 +537,101 @@ are `NULL` when no VIO pose has arrived at all. This is the per-frame equivalent
 of the bridge's `pose_log_db`; use the logger when you want images too, the
 bridge's log when you're recording a live inference run.
 
+## Troubleshooting: "the camera froze" / "everything is laggy"
+
+These symptoms are misleading, and in practice several causes stack and mask
+each other. **Measure before theorising** — [`tools/mqtt_probe.py`](tools/mqtt_probe.py)
+answers "is it arriving, at what rate, how evenly" in 20 seconds, and that
+separates a camera fault from a network fault from a stale-content fault:
+
+```bash
+python tools/mqtt_probe.py --broker darkhorse --duration 30
+```
+
+Healthy looks like this — rates matching the config, and `p99` close to `p50`:
+
+| topic | Hz | p50 gap | p99 gap | stalls |
+|---|---|---|---|---|
+| `gemnav/camera` | 3.00 (`rate_limit`) | 334 ms | 339 ms | none |
+| `gemnav/odometry` | ~8–10 (`pose_rate_limit`) | 119 ms | 151 ms | none |
+| `gemnav/odometry_vio` | 10.0 | 100 ms | 118 ms | none |
+| `gemnav/battery` | 2.0 | 508 ms | 554 ms | none |
+
+A `p50` of 333 ms with a `max` of 8000 ms is not "a bit slow" — it is a stall,
+and averages hide it. Then work down this list.
+
+### Everything lags a little, the camera lags a lot → WiFi power save
+
+The classic, and the easiest to misread as a camera fault. Ping the rover:
+
+```bash
+ping -c 15 192.168.1.104
+```
+
+The signature is a **capable minimum with a terrible average**: `min 3 ms,
+avg 90 ms, max 199 ms, mdev 75`, at 0% loss. The radio sleeps between beacons,
+so packets wait for the next wake-up. Small, infrequent messages (battery) look
+fine; multi-packet camera frames catch a sleep cycle repeatedly and arrive in
+bursts. Bandwidth is irrelevant — the whole stream is ~40 KB/s.
+
+```bash
+sudo iw dev wlan0 set power_save off        # immediate
+```
+
+Persist it across reboots, for every network, with a NetworkManager drop-in
+(`/etc/NetworkManager/conf.d/wifi-powersave-off.conf`):
+
+```ini
+[connection]
+wifi.powersave = 2
+```
+
+`nmcli con mod <profile> 802-11-wireless.powersave 2` also works but is
+per-profile, so it silently comes back on a network you forgot.
+
+### Camera stalls for seconds, telemetry is fine → capture back-pressure
+
+If the link is healthy and only `gemnav/camera` stalls, suspect the capture
+path. `rpicam-vid` writes into a 64 KB kernel pipe — smaller than one 720p MJPEG
+frame — so anything that drains it slowly stalls the sensor itself. Fixed by the
+reader thread in [`cameras/picamera.py`](rover_bridge/cameras/picamera.py); the
+tells if it ever regresses:
+
+- Lowering `fps` makes it **worse**, not better. The problem is back-pressure,
+  not data rate.
+- The OAK-D is unaffected (`--camera oakd`), because depthai drains the device
+  internally. That A/B is the fastest way to confirm.
+- `rpicam-vid` run standalone to a *file* is fine — no back-pressure there.
+
+The bridge logs its own capture rate every 10 s, which distinguishes "camera not
+producing" from "produced but not delivered":
+
+```
+picamera: published 30 frame(s) in 10 s (3.0 Hz)
+```
+
+| bridge log | probe | verdict |
+|---|---|---|
+| ~3 Hz | frames arriving | fine — look downstream |
+| ~3 Hz | nothing | network / broker |
+| 0 Hz or absent | nothing | camera side |
+
+### Pose arrives punctually but is stale, and gets worse → a queue
+
+If `gemnav/odometry_vio` shows a perfect rate and tiny gaps while the rover's
+position visibly trails reality — and the error *grows* — the VIO producer is
+outrunning its transport. Delivery rate tells you nothing here; only a physical
+move-and-watch does. See the growing-lag section in
+[`rover_vio_iphone`](../rover_vio_iphone), whose first suspect is the Record3D
+frame rate (an app update reverting to the free version locks it high).
+
+### Nothing arrives at all
+
+Check the bridge's startup log for the topic names it actually resolved — the
+`gemnav/*` names are config keys and a stale YAML on the rover is the usual
+culprit. `pose_topic`, `gt_pose_topic` and `vio_pose_topic` must be three
+distinct topics or the bridge refuses to start, which is itself a useful signal.
+
 ## Layout
 
 ```
@@ -552,4 +647,5 @@ rover_bridge/
   cameras/           # base + picamera + oakd + realsense backends, shared preprocess
 config/bridge.yaml   # checked-in defaults
 tools/data_logger.py # standalone recorder
+tools/mqtt_probe.py  # per-topic arrival rates/gaps — start here when "it's laggy"
 ```
