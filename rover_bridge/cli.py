@@ -70,6 +70,7 @@ DEFAULTS = {
 
     # action handling / arc steering
     "action_scale": 1.0,
+    "angular_action_scale": 1.0,  # extra multiplier on angular ONLY, on top of action_scale
     "use_waypoints": True,
     "waypoint_index": 2,
     "actuation_duration": 2.0,
@@ -102,7 +103,7 @@ DEFAULTS = {
 # (flag_dest, type, help) for keys whose CLI type isn't a plain str/auto.
 _BOOL_KEYS = {"no_camera", "use_waypoints", "recompute", "publish_display",
               "publish_pose", "publish_battery", "publish_gt_pose"}
-_FLOAT_KEYS = {"rate_limit", "crop_top_fraction", "action_scale", "actuation_duration",
+_FLOAT_KEYS = {"rate_limit", "crop_top_fraction", "action_scale", "angular_action_scale", "actuation_duration",
                "max_linear_velocity", "max_angular_velocity",
                "turn_in_place_threshold_deg", "min_angular_velocity",
                "publish_rate", "waypoint_tolerance", "max_action_age",
@@ -231,6 +232,18 @@ def _validate(cfg: SimpleNamespace) -> None:
                   cfg.gt_pose_topic)
         sys.exit(1)
 
+    if cfg.angular_action_scale <= 0.0:
+        log.error("--angular-action-scale must be > 0 (got %s); 0 would zero every "
+                  "turn command and the rover would only drive straight",
+                  cfg.angular_action_scale)
+        sys.exit(1)
+    if cfg.min_angular_velocity > 0.0 and cfg.angular_action_scale > 1.0:
+        log.warning("min_angular_velocity=%.2f is a DEAD-BAND: arc steering snaps "
+                    "|angular| below it to zero (before angular_action_scale is "
+                    "applied). Boosting turns while a dead-band is set works "
+                    "against you — set min_angular_velocity: 0.",
+                    cfg.min_angular_velocity)
+
     if cfg.publish_rate <= 2.0:
         log.warning("publish_rate=%.1f Hz is at/below the firmware heartbeat window "
                     "(~2 Hz) — the rover may stutter-stop. Use 5-10 Hz.",
@@ -268,6 +281,11 @@ def main(argv=None) -> int:
             log.info("ground-truth pose (%s) -> %s", secondary, cfg.gt_pose_topic)
         if cfg.pose_log_db:
             log.info("pose log: both sources -> %s", cfg.pose_log_db)
+    if cfg.action_scale != 1.0 or cfg.angular_action_scale != 1.0:
+        log.info("action scaling: linear x%.2f, angular x%.2f (%.2f x %.2f) — "
+                 "applies to inference AND remote teleop",
+                 cfg.action_scale, cfg.action_scale * cfg.angular_action_scale,
+                 cfg.action_scale, cfg.angular_action_scale)
     if cfg.use_waypoints:
         log.info("arc steering: waypoint_index=%d advance=%d tolerance=%.2f m recompute=%s",
                  cfg.waypoint_index, cfg.max_waypoint_advance, cfg.waypoint_tolerance,

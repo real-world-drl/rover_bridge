@@ -91,7 +91,16 @@ crop_top_fraction: 0.5       # only used when crop_mode == top
 rotate: 180                   # 0/90/180/270 clockwise; 180 for this rover's inverted mount
 
 # --- Action handling / arc steering ----------------------------------------
-action_scale: 1.0             # multiplier on raw linear/angular (fallback path only)
+action_scale: 1.0             # multiplier on BOTH linear and angular
+# Extra multiplier on the angular component only, on top of action_scale — for
+# turning harder without driving faster. A grippy surface (carpark asphalt) needs
+# more yaw authority than the arc geometry asks for: a typical arc computes well
+# under 1 rad/s, while ~2 rad/s is what actually breaks a 4-wheel skid-steer
+# loose. Applied after the velocity caps, so it can exceed max_angular_velocity;
+# the firmware still clamps. Also scales remote teleop.
+# NOTE: if turns are weak, do NOT reach for min_angular_velocity below — that is
+# a dead-band that zeroes small turns, i.e. the opposite of a floor.
+angular_action_scale: 1.0
 use_waypoints: true           # arc-steer on waypoints instead of raw velocities
 waypoint_index: 2             # initial target waypoint (0-indexed)
 actuation_duration: 1.0       # seconds the arc is meant to be driven (velocity scale)

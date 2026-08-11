@@ -55,7 +55,7 @@ class InferenceClient:
                  on_goal=None,
                  publisher: Optional[RepeatedCmdVelPublisher] = None,
                  follower: Optional[WaypointFollower] = None,
-                 action_scale: float = 1.0):
+                 action_scale: float = 1.0, angular_action_scale: float = 1.0):
         """
         Args:
             broker/port/keepalive: MQTT connection to the inference broker.
@@ -95,6 +95,11 @@ class InferenceClient:
             publisher: RepeatedCmdVelPublisher for the raw-velocity fallback and
                 stop commands.
             follower: WaypointFollower for waypoint trajectories (preferred).
+            angular_action_scale: extra multiplier on the angular component only,
+                on top of ``action_scale``. Applied on the same paths, so raw
+                actions and manual teleop turn harder too — if you use remote
+                driving as your reference for what the surface allows, remember
+                this moves that reference as well.
             action_scale: multiplier on raw linear/angular (fallback path only;
                 waypoint-derived velocities are scaled inside the follower).
         """
@@ -115,6 +120,7 @@ class InferenceClient:
         self.publisher = publisher
         self.follower = follower
         self.action_scale = action_scale
+        self.angular_action_scale = angular_action_scale
 
         self.client: Optional[mqtt.Client] = None
         self.halted = False
@@ -298,7 +304,8 @@ class InferenceClient:
         if "linear" in payload:
             cmd.linear_x = payload["linear"] * self.action_scale
         if "angular" in payload:
-            cmd.angular_z = payload["angular"] * self.action_scale
+            cmd.angular_z = (payload["angular"] * self.action_scale
+                             * self.angular_action_scale)
         self.publisher.publish(cmd)
 
     # --- remote topic -------------------------------------------------------
@@ -328,7 +335,8 @@ class InferenceClient:
 
         cmd = CmdVel(
             linear_x=float(payload.get("linear", 0.0)) * self.action_scale,
-            angular_z=float(payload.get("angular", 0.0)) * self.action_scale,
+            angular_z=(float(payload.get("angular", 0.0)) * self.action_scale
+                       * self.angular_action_scale),
         )
 
         # Clear any in-flight waypoint trajectory so a pose update can't override

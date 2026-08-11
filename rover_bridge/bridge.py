@@ -120,6 +120,7 @@ class RoverBridge:
                 publisher=self.publisher,
                 arc_steering=arc,
                 action_scale=cfg.action_scale,
+                angular_action_scale=cfg.angular_action_scale,
                 max_waypoint_advance=cfg.max_waypoint_advance,
                 waypoint_tolerance=cfg.waypoint_tolerance,
                 max_action_age=cfg.max_action_age,
@@ -175,6 +176,7 @@ class RoverBridge:
             on_goal=self._on_goal,
             publisher=self.publisher, follower=self.follower,
             action_scale=cfg.action_scale,
+            angular_action_scale=cfg.angular_action_scale,
         )
 
         # Pose streaming bookkeeping (rate-limited in _publish_pose/_publish_gt_pose).

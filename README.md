@@ -314,6 +314,46 @@ differential rover's `cmd_vel` wants. Differences from the Spot tuning:
   `max_angular_velocity` 2.0 rad/s). These are host-side shaping caps; the
   firmware also clamps via `UGV_MAX_LINEAR/ANGULAR`.
 
+### The rover won't turn hard enough (grippy surfaces)
+
+A 4-wheel skid-steer has to scrub all four wheels sideways to rotate, and on
+grippy asphalt that needs far more yaw authority than the arc geometry asks for.
+The gap is bigger than it looks: a pivot commands `target_angle /
+actuation_duration`, so a 30° bearing over 1 s is **0.52 rad/s** — a quarter of
+the ~2 rad/s that visibly works under manual teleop.
+
+Levers, best first:
+
+1. **`min_drive` in the firmware** — the only one that addresses the physics
+   rather than compensating for it. `UGV_MIN_DRIVE_PWM` floors the PWM *while a
+   wheel is stalled*, to break stiction, and disengages once rolling so it does
+   not flatten the wheel differential mid-turn. Live-tunable, no reflash:
+   `../RoverLink/tools/pid_tune.py --broker darkhorse --id ugv01 --min-drive 55`.
+2. **`waypoint_index`** (lower = nearer target) — the pure-pursuit lookahead.
+   Shorter lookahead means higher curvature, i.e. more turn per unit of forward
+   motion. The right lever when it turns but not *tightly* enough.
+3. **`angular_action_scale`** — multiplies the angular component only, on top of
+   `action_scale`. Use when the rover drives fine but under-turns; `action_scale`
+   alone makes it faster *and* turnier, which usually isn't what you want.
+4. **`actuation_duration`** (lower) — divides into both velocities, so everything
+   gets more aggressive with the arc shape preserved.
+
+Two traps:
+
+- **`min_angular_velocity` is a dead-band, not a floor.** Anything below it is
+  snapped to **zero** (`arc_steering.py`), to suppress jittery micro-turns.
+  Raising it deletes exactly the weak turns you are trying to strengthen. The
+  bridge warns if you combine it with `angular_action_scale > 1`.
+- **The caps are applied preserving the linear/angular ratio.** If an arc exceeds
+  `max_linear_velocity`, *both* components are scaled down — so the linear cap
+  throttles your turn rate, and raising `max_linear_velocity` can *increase* the
+  delivered angular. Counter-intuitive, but it falls out of keeping arc geometry
+  intact.
+
+`action_scale` and `angular_action_scale` both apply to **remote teleop as well**
+as inference. If manual driving is your reference for what the surface allows,
+remember that raising these moves that reference too.
+
 ## Stop latency & heartbeat
 
 `publish_rate` (default 10 Hz) sets how often `cmd_vel` is republished. Keep it

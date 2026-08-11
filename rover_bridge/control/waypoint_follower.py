@@ -51,7 +51,8 @@ def _waypoint_in_current_frame(tx, ty, ref_pose, cur_pose):
 
 class WaypointFollower:
     def __init__(self, publisher: RepeatedCmdVelPublisher, arc_steering: ArcSteering,
-                 action_scale: float = 1.0, max_waypoint_advance: int = 0,
+                 action_scale: float = 1.0, angular_action_scale: float = 1.0,
+                 max_waypoint_advance: int = 0,
                  waypoint_tolerance: float = 0.3, max_action_age: Optional[float] = None,
                  recompute: bool = True):
         """
@@ -59,6 +60,11 @@ class WaypointFollower:
             publisher: RepeatedCmdVelPublisher to push computed commands into.
             arc_steering: ArcSteering for computing velocities from waypoints.
             action_scale: Scale applied to computed linear/angular velocities.
+            angular_action_scale: Extra multiplier on the angular component only,
+                applied on top of ``action_scale``. For turning harder without
+                driving faster — a grippy surface needs more yaw authority than
+                the arc geometry asks for, and scaling both just makes the rover
+                fast as well as turny.
             max_waypoint_advance: How many waypoints past
                 ``arc_steering.waypoint_index`` to advance to before stopping.
                 0 = no advance.
@@ -71,6 +77,7 @@ class WaypointFollower:
         self.publisher = publisher
         self.arc_steering = arc_steering
         self.action_scale = action_scale
+        self.angular_action_scale = angular_action_scale
         self.max_waypoint_advance = max_waypoint_advance
         self.waypoint_tolerance = waypoint_tolerance
         self.max_action_age = max_action_age
@@ -177,8 +184,9 @@ class WaypointFollower:
         computed = self.arc_steering.compute_velocities(waypoints, index=index)
         if computed is None:
             return None
-        return CmdVel(linear_x=computed[0] * self.action_scale,
-                      angular_z=computed[1] * self.action_scale)
+        return CmdVel(
+            linear_x=computed[0] * self.action_scale,
+            angular_z=computed[1] * self.action_scale * self.angular_action_scale)
 
     def _recompute_cmd(self) -> Optional[CmdVel]:
         """Re-aim the arc at the current target waypoint from the latest pose."""
